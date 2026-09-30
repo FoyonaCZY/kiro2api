@@ -564,6 +564,7 @@ func ConvertRequest(req *MessagesRequest) (*ConversionResult, error) {
 	if len(names) > 0 {
 		slog.Info(fmt.Sprintf("工具名称映射: %d 个超长名称已缩短", len(names)))
 	}
+	limitHistoryImages(history, len(images))
 	return &ConversionResult{
 		State: kiro.ConversationState{
 			AgentContinuationID: uuid.NewString(),
