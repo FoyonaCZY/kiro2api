@@ -1,0 +1,9 @@
+services:
+  kiro2api:
+    image: kiro2api:local
+    container_name: kiro2api
+    ports:
+      - "127.0.0.1:8990:8990"
+    volumes:
+      - ./config:/app/config
+    restart: unless-stopped

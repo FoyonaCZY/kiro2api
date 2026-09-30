@@ -1,0 +1,14 @@
+/bin/
+/config.json
+/credentials.json
+/credentials.*
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+/kiro_balance_cache.json
+/kiro_stats.json
+/admin-ui/node_modules/
+/admin-ui/dist/
+/admin-ui/tsconfig.tsbuildinfo
+/.idea/
+/.vscode/

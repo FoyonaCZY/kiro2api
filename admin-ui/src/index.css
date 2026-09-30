@@ -1,0 +1,61 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 40 18% 96%;
+    --foreground: 30 8% 12%;
+    --card: 40 20% 99%;
+    --card-foreground: 30 8% 12%;
+    --popover: 40 20% 99%;
+    --popover-foreground: 30 8% 12%;
+    --primary: 32 32% 32%;
+    --primary-foreground: 40 20% 96%;
+    --secondary: 36 14% 92%;
+    --secondary-foreground: 30 8% 16%;
+    --muted: 36 14% 92%;
+    --muted-foreground: 30 6% 38%;
+    --accent: 36 18% 90%;
+    --accent-foreground: 30 8% 16%;
+    --destructive: 4 55% 42%;
+    --destructive-foreground: 40 20% 96%;
+    --border: 34 12% 84%;
+    --input: 34 12% 84%;
+    --ring: 32 28% 38%;
+    --radius: 0.7rem;
+  }
+
+  .dark {
+    --background: 0 0% 12%;
+    --foreground: 40 18% 94%;
+    --card: 0 0% 15%;
+    --card-foreground: 40 18% 94%;
+    --popover: 0 0% 16%;
+    --popover-foreground: 40 18% 94%;
+    --primary: 36 38% 61%;
+    --primary-foreground: 0 0% 12%;
+    --secondary: 0 0% 18%;
+    --secondary-foreground: 40 14% 88%;
+    --muted: 0 0% 18%;
+    --muted-foreground: 36 6% 62%;
+    --accent: 0 0% 20%;
+    --accent-foreground: 40 18% 94%;
+    --destructive: 4 42% 48%;
+    --destructive-foreground: 40 18% 94%;
+    --border: 0 0% 23%;
+    --input: 0 0% 23%;
+    --ring: 36 38% 61%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: Inter, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}

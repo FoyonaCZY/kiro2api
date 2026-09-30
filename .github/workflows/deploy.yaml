@@ -1,0 +1,54 @@
+name: Deploy
+
+# 只能在 Actions 页面手动运行。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build --build-arg VERSION=${GITHUB_SHA::7} -t kiro2api:local .
+
+      - name: Save image
+        run: docker save kiro2api:local | gzip > kiro2api.tar.gz
+
+      - name: Upload image and compose file
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          password: ${{ secrets.DEPLOY_PASSWORD }}
+          port: 22
+          source: kiro2api.tar.gz,docker-compose.deploy.yml
+          target: /home/ubuntu/kiro-deploy
+          overwrite: true
+
+      - name: Load image and restart
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          password: ${{ secrets.DEPLOY_PASSWORD }}
+          port: 22
+          script: |
+            set -euo pipefail
+            # 沿用 kiro.rs 的数据目录，accounts/usage/access.sqlite 直接接管
+            DATA=/home/ubuntu/kiro.rs
+            mkdir -p "$DATA/config"
+            gunzip -c /home/ubuntu/kiro-deploy/kiro2api.tar.gz | sudo docker load
+            cp /home/ubuntu/kiro-deploy/docker-compose.deploy.yml "$DATA/docker-compose.kiro2api.yml"
+            # 旧的 kiro-rs 容器占着 8990，先停掉（保留容器和镜像，方便回滚）
+            if sudo docker ps -q --filter name=^kiro-rs$ | grep -q .; then sudo docker stop kiro-rs; fi
+            cd "$DATA"
+            sudo docker compose -p kiro2api -f docker-compose.kiro2api.yml up -d --force-recreate
+            sudo docker ps --filter name=kiro2api
+            rm -f /home/ubuntu/kiro-deploy/kiro2api.tar.gz
