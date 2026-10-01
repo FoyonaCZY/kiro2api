@@ -200,6 +200,7 @@ type Update struct {
 	ClientID      *string
 	ClientSecret  *string
 	MachineID     *string
+	ProfileArn    *string
 	ClaudeBaseURL *string
 	ClaudeAPIKey  *string
 }
@@ -232,6 +233,7 @@ func ApplyUpdate(c *Credentials, u *Update) error {
 	setTrim(&c.AuthRegion, u.AuthRegion)
 	setTrim(&c.APIRegion, u.APIRegion)
 	setTrim(&c.ClientID, u.ClientID)
+	setTrim(&c.ProfileArn, u.ProfileArn)
 	if v, ok := nonBlank(u.ClientSecret); ok {
 		c.ClientSecret = v
 	}

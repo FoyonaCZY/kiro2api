@@ -360,6 +360,7 @@ type updateReq struct {
 	ClientID      *string `json:"clientId"`
 	ClientSecret  *string `json:"clientSecret"`
 	MachineID     *string `json:"machineId"`
+	ProfileArn    *string `json:"profileArn"`
 	ClaudeBaseURL *string `json:"claudeBaseUrl"`
 	ClaudeAPIKey  *string `json:"claudeApiKey"`
 }
@@ -379,6 +380,7 @@ func (s *Service) updateCredential(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	u := &kiro.Update{Email: b.Email, Priority: b.Priority, ProxyLine: b.Proxy, ProxyURL: b.ProxyURL, ProxyUsername: b.ProxyUsername,
+		ProfileArn:    b.ProfileArn,
 		ProxyPassword: b.ProxyPassword, Endpoint: b.Endpoint, Region: b.Region, AuthRegion: b.AuthRegion, APIRegion: b.APIRegion,
 		RefreshToken: b.RefreshToken, ClientID: b.ClientID, ClientSecret: b.ClientSecret, MachineID: b.MachineID,
 		ClaudeBaseURL: b.ClaudeBaseURL, ClaudeAPIKey: b.ClaudeAPIKey}
@@ -473,6 +475,7 @@ type addReq struct {
 	AuthRegion    string `json:"authRegion"`
 	APIRegion     string `json:"apiRegion"`
 	MachineID     string `json:"machineId"`
+	ProfileArn    string `json:"profileArn,omitempty"`
 	Email         string `json:"email"`
 	ProxyURL      string `json:"proxyUrl"`
 	ProxyUsername string `json:"proxyUsername"`
@@ -496,7 +499,7 @@ func (s *Service) add(ctx context.Context, b addReq) (map[string]any, *svcErr) {
 		b.AuthMethod = "social"
 	}
 	c := &kiro.Credentials{RefreshToken: b.RefreshToken, AuthMethod: b.AuthMethod, ClientID: b.ClientID, ClientSecret: b.ClientSecret,
-		Priority: b.Priority, Region: b.Region, AuthRegion: b.AuthRegion, APIRegion: b.APIRegion, MachineID: b.MachineID,
+		Priority: b.Priority, Region: b.Region, AuthRegion: b.AuthRegion, APIRegion: b.APIRegion, MachineID: b.MachineID, ProfileArn: b.ProfileArn,
 		Email: b.Email, ProxyURL: b.ProxyURL, ProxyUsername: b.ProxyUsername, ProxyPassword: b.ProxyPassword,
 		KiroAPIKey: b.KiroAPIKey, Endpoint: b.Endpoint, ClaudeBaseURL: b.ClaudeBaseURL, ClaudeAPIKey: b.ClaudeAPIKey}
 	id, err := s.TM.AddCredential(ctx, c)

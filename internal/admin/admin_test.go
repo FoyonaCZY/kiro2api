@@ -46,7 +46,7 @@ func TestAdminCredentials(t *testing.T) {
 	if st, _ := do(t, srv, "GET", "/api/admin/credentials", "wrong", ""); st != 401 {
 		t.Fatal(st)
 	}
-	st, body := do(t, srv, "PUT", "/api/admin/credentials/1", "adm", `{"email":"renamed","proxy":"socks5://gate.example:1080:user-a:pw-secret"}`)
+	st, body := do(t, srv, "PUT", "/api/admin/credentials/1", "adm", `{"email":"renamed","proxy":"socks5://gate.example:1080:user-a:pw-secret","profileArn":"arn:aws:codewhisperer:us-east-1:1:profile/TESTPROFILE"}`)
 	if st != 200 {
 		t.Fatal(st, body)
 	}
@@ -68,7 +68,7 @@ func TestAdminCredentials(t *testing.T) {
 			t.Errorf("missing key %s", k)
 		}
 	}
-	if c1["email"] != "renamed" || c1["proxyUrl"] != "socks5://gate.example:1080" || c1["proxyUsername"] != "user-a" || c1["hasProxyPassword"] != true || c1["endpoint"] != "ide" || c1["maskedApiKey"] != "ksk_...cret" {
+	if c1["email"] != "renamed" || c1["proxyUrl"] != "socks5://gate.example:1080" || c1["proxyUsername"] != "user-a" || c1["hasProxyPassword"] != true || c1["endpoint"] != "ide" || c1["maskedApiKey"] != "ksk_...cret" || c1["hasProfileArn"] != true {
 		t.Fatalf("%v", c1)
 	}
 	if c2["authMethod"] != "claude_api" || c2["endpoint"] != "" || c2["claudeBaseUrl"] != "https://c.example" || c2["hasClaudeApiKey"] != true {
