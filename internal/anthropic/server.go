@@ -441,24 +441,27 @@ func readChunks(body io.Reader, done <-chan struct{}) <-chan chunk {
 	return ch
 }
 
-// drain 取出所有完整帧；可恢复的错误跳过继续，连续错误过多时停止。
-func drain(d *kiro.Decoder, fn func(*kiro.Event)) {
+// eventSource 上游事件。/v1/responses 是 SSE。
+type eventSource interface {
+	Feed([]byte) error
+	NextEvent() (*kiro.Event, error)
+}
+
+// drain 取出所有完整事件；连续错误过多时停止。
+func drain(d eventSource, fn func(*kiro.Event)) {
 	for {
-		f, err := d.Next()
+		ev, err := d.NextEvent()
 		if err != nil {
 			if errors.Is(err, kiro.ErrTooManyErrors) {
 				return
 			}
 			slog.Warn("解码事件失败", "err", err)
-			_ = d.Feed(nil)
-			continue
-		}
-		if f == nil {
 			return
 		}
-		if ev, err := kiro.EventFromFrame(f); err == nil {
-			fn(ev)
+		if ev == nil {
+			return
 		}
+		fn(ev)
 	}
 }
 
@@ -511,7 +514,7 @@ func (s *Server) streamResp(w http.ResponseWriter, r *http.Request, c *call, buf
 	chunks := readChunks(up.Resp.Body, done)
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
-	var dec kiro.Decoder
+	var dec kiro.SSEDecoder
 	for {
 		select {
 		case <-ctx.Done():
@@ -581,7 +584,7 @@ func (s *Server) nonStream(w http.ResponseWriter, r *http.Request, c *call) {
 		writeError(w, http.StatusBadGateway, "api_error", "读取响应失败: "+err.Error())
 		return
 	}
-	var dec kiro.Decoder
+	var dec kiro.SSEDecoder
 	if err := dec.Feed(raw); err != nil {
 		slog.Warn("缓冲区溢出", "err", err)
 	}

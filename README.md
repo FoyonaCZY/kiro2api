@@ -7,7 +7,7 @@ Anthropic Messages 兼容网关。后端是一池 Kiro 账号和 Claude Messages
 ## 功能
 
 - `/v1/messages`、`/v1/messages/count_tokens`、`/v1/models`；`/cc/v1/messages` 缓冲到流结束，用 `contextUsageEvent` 的准确值写 `message_start`
-- Kiro 端点：对齐 1.4.26，对话和 MCP 都打 `runtime.{region}.kiro.dev`。凭据上的 `krs` / `ide` 名字还保留，主机已经是同一个；Social / IdC 刷新、`invalid_grant` 立即停用
+- Kiro 端点：对齐 1.4.26。对话打 `runtime.{region}.kiro.dev/v1/responses`，MCP 仍是同主机的 `/mcp`。凭据上的 `krs` / `ide` 名字还保留；Social / IdC 刷新、`invalid_grant` 立即停用
 - Claude Messages API 账号：请求和响应原样双向透传；同一请求里每个账号只试一次，超时和 5xx 只换号
 - 接入 Key 和调度分组；限流冷却、连续失败停用、全组自动禁用后自愈
 - 模拟 prompt cache 计费（按接入 Key 隔离）；单价、账号人民币成本和成本倍率，改价后历史按新价重算；失败和断流请求不计费

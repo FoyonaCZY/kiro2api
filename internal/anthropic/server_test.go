@@ -1,7 +1,6 @@
 package anthropic
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -31,13 +30,14 @@ func fakeKiro(t *testing.T, gotBody *[]byte) *httptest.Server {
 			return
 		}
 		*gotBody, _ = io.ReadAll(r.Body)
-		var out bytes.Buffer
-		out.Write(kiro.EncodeEvent("assistantResponseEvent", map[string]any{"content": "<thinking>\nplan</thinking>\n\n"}))
-		out.Write(kiro.EncodeEvent("assistantResponseEvent", map[string]any{"content": "Hello"}))
-		out.Write(kiro.EncodeEvent("toolUseEvent", map[string]any{"name": "Read", "toolUseId": "t1", "input": `{"p":`}))
-		out.Write(kiro.EncodeEvent("toolUseEvent", map[string]any{"name": "Read", "toolUseId": "t1", "input": `1}`, "stop": true}))
-		out.Write(kiro.EncodeEvent("contextUsageEvent", map[string]any{"contextUsagePercentage": 0.5}))
-		w.Write(out.Bytes())
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"<thinking>\\nplan</thinking>\\n\\n\"}\n\n"+
+			"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n"+
+			"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"t1\",\"name\":\"Read\",\"arguments\":\"\"}}\n\n"+
+			"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"p\\\":\"}\n\n"+
+			"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"1}\"}\n\n"+
+			"data: {\"type\":\"response.function_call_arguments.done\"}\n\n"+
+			"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"kiro:context_usage_percentage\":0.5}}}\n\n")
 	}))
 }
 
@@ -102,7 +102,7 @@ func TestEndToEndMessages(t *testing.T) {
 	}
 	var kr map[string]any
 	json.Unmarshal(got, &kr)
-	if kr["profileArn"] != "arn:p" || !strings.Contains(string(got), `"modelId":"claude-opus-5.5"`) || strings.Contains(string(got), `\u003c`) {
+	if kr["profileArn"] != "arn:p" || kr["model"] != "claude-opus-5.5" || kr["origin"] != "AI_EDITOR" || kr["stream"] != true || strings.Contains(string(got), `\u003c`) {
 		t.Fatalf("outbound body %s", got)
 	}
 

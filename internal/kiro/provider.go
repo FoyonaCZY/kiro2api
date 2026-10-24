@@ -289,7 +289,10 @@ func (p *Provider) CallMessages(ctx context.Context, kiroBody []byte, fw *Claude
 			continue
 		}
 		rc := &RequestContext{Cred: cc.Cred, Token: cc.Token, MachineID: mid, Config: cfg}
-		body := ep.TransformAPIBody(string(kiroBody), rc)
+		body, err := ResponsesFromKiro(ep.TransformAPIBody(string(kiroBody), rc), cfg.AgentMode)
+		if err != nil {
+			return nil, err
+		}
 		target := Target{CredentialID: cc.ID, Account: accountName(cc.Cred, cc.ID), Endpoint: ep.Name(),
 			OutboundHeaders: redact.EncodeHeaders(ep.APILogHeaders(&RequestContext{Cred: cc.Cred, MachineID: mid, Config: cfg}))}
 		lastTarget = &target

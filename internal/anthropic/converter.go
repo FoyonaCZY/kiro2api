@@ -90,8 +90,9 @@ func (e *ConversionError) Error() string {
 
 // ConversionResult 转换结果。ToolNameMap 为短名 → 原名。
 type ConversionResult struct {
-	State       kiro.ConversationState
-	ToolNameMap map[string]string
+	State        kiro.ConversationState
+	Instructions string
+	ToolNameMap  map[string]string
 }
 
 func normalizeSchema(raw json.RawMessage) json.RawMessage {
@@ -396,25 +397,31 @@ func mergeAssistant(msgs []Message, names map[string]string) kiro.HistoryMessage
 	return kiro.HistoryMessage{Assistant: &kiro.AssistantMessage{Content: content, ToolUses: uses}}
 }
 
-func buildHistory(req *MessagesRequest, msgs []Message, model string, names map[string]string) []kiro.HistoryMessage {
-	var history []kiro.HistoryMessage
+func systemInstructions(req *MessagesRequest) string {
 	prefix := thinkingPrefix(req)
+	var sys string
 	if len(req.System) > 0 {
 		texts := make([]string, len(req.System))
 		for i, s := range req.System {
 			texts[i] = s.Text
 		}
-		sys := strings.Join(texts, "\n")
+		sys = strings.Join(texts, "\n")
 		if sys != "" {
-			sys = sys + "\n" + systemChunkPolicy
-			if prefix != "" && !hasThinkingTags(sys) {
-				sys = prefix + "\n" + sys
-			}
-			history = append(history, userHistory(sys, model), assistantHistory("I will follow these instructions."))
+			sys += "\n" + systemChunkPolicy
 		}
-	} else if prefix != "" {
-		history = append(history, userHistory(prefix, model), assistantHistory("I will follow these instructions."))
 	}
+	if prefix != "" && !hasThinkingTags(sys) {
+		if sys != "" {
+			sys = prefix + "\n" + sys
+		} else {
+			sys = prefix
+		}
+	}
+	return sys
+}
+
+func buildHistory(msgs []Message, model string, names map[string]string) []kiro.HistoryMessage {
+	var history []kiro.HistoryMessage
 	var ub, ab []Message
 	for _, m := range msgs[:len(msgs)-1] {
 		switch m.Role {
@@ -504,7 +511,7 @@ func removeOrphanedToolUses(history []kiro.HistoryMessage, orphaned map[string]b
 
 // KiroBody 请求根；profileArn 由 provider 按实际凭据注入。
 func KiroBody(r *ConversionResult) kiro.KiroRequest {
-	return kiro.KiroRequest{ConversationState: r.State}
+	return kiro.KiroRequest{ConversationState: r.State, Instructions: r.Instructions}
 }
 
 // ConvertRequest Anthropic → Kiro。
@@ -542,7 +549,7 @@ func ConvertRequest(req *MessagesRequest) (*ConversionResult, error) {
 	text, images, results := processContent(msgs[len(msgs)-1].Content)
 	names := map[string]string{}
 	tools := convertTools(req.Tools, names)
-	history := buildHistory(req, msgs, model, names)
+	history := buildHistory(msgs, model, names)
 	results, orphaned := validateToolPairing(history, results)
 	removeOrphanedToolUses(history, orphaned)
 
@@ -566,8 +573,9 @@ func ConvertRequest(req *MessagesRequest) (*ConversionResult, error) {
 	}
 	limitHistoryImages(history, len(images))
 	return &ConversionResult{
+		Instructions: systemInstructions(req),
 		State: kiro.ConversationState{
-			AgentContinuationID: uuid.NewString(),
+			AgentContinuationID: convID,
 			AgentTaskType:       "vibe",
 			ChatTriggerType:     "MANUAL",
 			CurrentMessage: kiro.CurrentMessage{UserInputMessage: kiro.UserInputMessage{

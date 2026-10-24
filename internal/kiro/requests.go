@@ -22,6 +22,7 @@ func MarshalNoEscape(v any) ([]byte, error) {
 type KiroRequest struct {
 	ConversationState ConversationState `json:"conversationState"`
 	ProfileArn        string            `json:"profileArn,omitempty"`
+	Instructions      string            `json:"instructions,omitempty"`
 }
 
 // ConversationState 对话状态。

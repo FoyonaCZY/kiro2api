@@ -88,7 +88,7 @@ func TestMachineID(t *testing.T) {
 		t.Fatal(rt)
 	}
 	ctx := &RequestContext{Cred: &Credentials{APIRegion: "eu-central-1"}, Config: config.Default()}
-	if got := (IDE{}).APIURL(ctx); got != "https://runtime.eu-central-1.kiro.dev/generateAssistantResponse" {
+	if got := (IDE{}).APIURL(ctx); got != "https://runtime.eu-central-1.kiro.dev/v1/responses" {
 		t.Fatal(got)
 	}
 	if got := (KRS{}).MCPURL(ctx); got != "https://runtime.eu-central-1.kiro.dev/mcp" {

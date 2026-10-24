@@ -107,7 +107,7 @@ type IDE struct{}
 func (IDE) Name() string                    { return EndpointIDE }
 func (IDE) host(ctx *RequestContext) string { return runtimeHost(ctx) }
 func (e IDE) APIURL(ctx *RequestContext) string {
-	return "https://" + e.host(ctx) + "/generateAssistantResponse"
+	return "https://" + e.host(ctx) + "/v1/responses"
 }
 func (e IDE) MCPURL(ctx *RequestContext) string { return "https://" + e.host(ctx) + "/mcp" }
 func (IDE) ua(ctx *RequestContext) string {
@@ -117,18 +117,7 @@ func (IDE) amzUA(ctx *RequestContext) string {
 	return RuntimeAmzUserAgent(ctx.Config, ctx.MachineID)
 }
 
-func (e IDE) DecorateAPI(r *http.Request, ctx *RequestContext) {
-	h := r.Header
-	h.Set("x-amzn-codewhisperer-optout", "true")
-	h.Set("x-amzn-kiro-agent-mode", ctx.Config.AgentMode)
-	h.Set("x-amz-user-agent", e.amzUA(ctx))
-	h.Set("user-agent", e.ua(ctx))
-	h.Set("amz-sdk-invocation-id", uuid.NewString())
-	h.Set("amz-sdk-request", "attempt=1; max=3")
-	h.Set("Authorization", "Bearer "+ctx.Token)
-	r.Host = e.host(ctx)
-	setTokenType(h, ctx.Cred)
-}
+func (e IDE) DecorateAPI(r *http.Request, ctx *RequestContext) { decorateResponses(r, ctx) }
 
 func (e IDE) DecorateMCP(r *http.Request, ctx *RequestContext) {
 	h := r.Header
@@ -148,18 +137,7 @@ func (IDE) TransformAPIBody(b string, ctx *RequestContext) string {
 	return InjectProfileArn(b, ctx.Cred.ProfileArn)
 }
 
-func (e IDE) APILogHeaders(ctx *RequestContext) [][2]string {
-	h := [][2]string{
-		{"content-type", "application/json"}, {"Connection", "close"},
-		{"x-amzn-codewhisperer-optout", "true"}, {"x-amzn-kiro-agent-mode", ctx.Config.AgentMode},
-		{"x-amz-user-agent", e.amzUA(ctx)}, {"user-agent", e.ua(ctx)}, {"host", e.host(ctx)},
-		{"amz-sdk-request", "attempt=1; max=3"}, {"Authorization", "Bearer ***"},
-	}
-	if tt := ctx.Cred.UpstreamTokenType(); tt != "" {
-		h = append(h, [2]string{"TokenType", tt})
-	}
-	return h
-}
+func (e IDE) APILogHeaders(ctx *RequestContext) [][2]string { return responsesLogHeaders(ctx) }
 
 // KRS 与 IDE 现在打同一个 KiroRuntime 主机。名字还留着，是为了不改已有凭据上的 endpoint 字段。
 type KRS struct{}
@@ -167,7 +145,7 @@ type KRS struct{}
 func (KRS) Name() string                    { return EndpointKRS }
 func (KRS) host(ctx *RequestContext) string { return runtimeHost(ctx) }
 func (e KRS) APIURL(ctx *RequestContext) string {
-	return "https://" + e.host(ctx) + "/generateAssistantResponse"
+	return "https://" + e.host(ctx) + "/v1/responses"
 }
 func (e KRS) MCPURL(ctx *RequestContext) string { return "https://" + e.host(ctx) + "/mcp" }
 func (KRS) ua(ctx *RequestContext) string       { return RuntimeUserAgent(ctx.Config, ctx.MachineID) }
@@ -175,22 +153,7 @@ func (KRS) amzUA(ctx *RequestContext) string {
 	return RuntimeAmzUserAgent(ctx.Config, ctx.MachineID)
 }
 
-func (e KRS) DecorateAPI(r *http.Request, ctx *RequestContext) {
-	h := r.Header
-	h.Set("Accept", "*/*")
-	h.Set("x-amzn-codewhisperer-optout", "true")
-	h.Set("x-amzn-kiro-agent-mode", ctx.Config.AgentMode)
-	h.Set("x-amz-user-agent", e.amzUA(ctx))
-	h.Set("user-agent", e.ua(ctx))
-	h.Set("amz-sdk-invocation-id", uuid.NewString())
-	h.Set("amz-sdk-request", "attempt=1; max=3")
-	h.Set("Authorization", "Bearer "+ctx.Token)
-	if ctx.Cred.ProfileArn != "" {
-		h.Set("x-amzn-kiro-profile-arn", ctx.Cred.ProfileArn)
-	}
-	r.Host = e.host(ctx)
-	setTokenType(h, ctx.Cred)
-}
+func (e KRS) DecorateAPI(r *http.Request, ctx *RequestContext) { decorateResponses(r, ctx) }
 
 func (e KRS) DecorateMCP(r *http.Request, ctx *RequestContext) {
 	h := r.Header
@@ -210,15 +173,31 @@ func (KRS) TransformAPIBody(b string, ctx *RequestContext) string {
 	return InjectProfileArn(b, ctx.Cred.ProfileArn)
 }
 
-func (e KRS) APILogHeaders(ctx *RequestContext) [][2]string {
+func (e KRS) APILogHeaders(ctx *RequestContext) [][2]string { return responsesLogHeaders(ctx) }
+
+// decorateResponses 对齐 1.4.26 的 POST /v1/responses，不再带 smithy 的 amz-sdk 头。
+func decorateResponses(r *http.Request, ctx *RequestContext) {
+	h := r.Header
+	h.Set("x-amzn-kiro-origin", OriginIDE)
+	h.Set("x-amzn-codewhisperer-optout", "true")
+	h.Set("user-agent", RuntimeUserAgent(ctx.Config, ctx.MachineID))
+	h.Set("Authorization", "Bearer "+ctx.Token)
+	if ctx.Cred.ProfileArn != "" {
+		h.Set("x-amzn-kiro-profile", ctx.Cred.ProfileArn)
+	}
+	r.Host = runtimeHost(ctx)
+	setTokenType(h, ctx.Cred)
+}
+
+func responsesLogHeaders(ctx *RequestContext) [][2]string {
 	h := [][2]string{
-		{"content-type", "application/json"}, {"Accept", "*/*"}, {"Connection", "close"},
-		{"x-amzn-codewhisperer-optout", "true"}, {"x-amzn-kiro-agent-mode", ctx.Config.AgentMode},
-		{"x-amz-user-agent", e.amzUA(ctx)}, {"user-agent", e.ua(ctx)}, {"host", e.host(ctx)},
-		{"amz-sdk-request", "attempt=1; max=3"}, {"Authorization", "Bearer ***"},
+		{"content-type", "application/json"}, {"Connection", "close"},
+		{"x-amzn-kiro-origin", OriginIDE}, {"x-amzn-codewhisperer-optout", "true"},
+		{"user-agent", RuntimeUserAgent(ctx.Config, ctx.MachineID)}, {"host", runtimeHost(ctx)},
+		{"Authorization", "Bearer ***"},
 	}
 	if ctx.Cred.ProfileArn != "" {
-		h = append(h, [2]string{"x-amzn-kiro-profile-arn", ctx.Cred.ProfileArn})
+		h = append(h, [2]string{"x-amzn-kiro-profile", ctx.Cred.ProfileArn})
 	}
 	if tt := ctx.Cred.UpstreamTokenType(); tt != "" {
 		h = append(h, [2]string{"TokenType", tt})
