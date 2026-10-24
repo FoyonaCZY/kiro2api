@@ -51,7 +51,7 @@ func Default() *Config {
 	return &Config{
 		Host:                  "127.0.0.1",
 		Port:                  8080,
-		Region:                "us-east-1",
+		Region:                "eu-central-1",
 		KiroVersion:           "1.4.26",
 		SystemVersion:         "win32#10.0.26200",
 		NodeVersion:           "24.21.0",

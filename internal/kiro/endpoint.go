@@ -16,7 +16,7 @@ const (
 
 // runtimeHost Kiro 1.4.26 的对话和 MCP 都打到 runtime.{region}.kiro.dev，不再走 q.*.amazonaws.com。
 func runtimeHost(ctx *RequestContext) string {
-	region := "us-east-1"
+	region := "eu-central-1"
 	if ctx != nil && ctx.Cred != nil && ctx.Config != nil {
 		if r := ctx.Cred.EffectiveAPIRegion(ctx.Config); r != "" {
 			region = r

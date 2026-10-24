@@ -26,7 +26,6 @@ import (
 // 浏览器回调到 http://localhost:3128，把回调 URL 贴回来后用同一条 SOCKS5 换 refresh token。
 const (
 	authPortal     = "https://app.kiro.dev"
-	tokenEndpoint  = "https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token"
 	redirectOrigin = "http://localhost:3128"
 	loginTTL       = 10 * time.Minute
 )
@@ -210,7 +209,8 @@ func exchangeSocialCode(ctx context.Context, cfg *config.Config, p pendingLogin,
 		return nil, err
 	}
 	body, _ := json.Marshal(map[string]string{"code": cb.code, "code_verifier": p.codeVerifier, "redirect_uri": cb.exchangeRedirect()})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, bytes.NewReader(body))
+	tokenURL := "https://prod." + cfg.EffectiveAuthRegion() + ".auth.desktop.kiro.dev/oauth/token"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

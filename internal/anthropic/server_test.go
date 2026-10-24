@@ -26,7 +26,7 @@ func (e localEndpoint) APIURL(*kiro.RequestContext) string { return e.url }
 
 func fakeKiro(t *testing.T, gotBody *[]byte) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer tok" || r.Host != "runtime.us-east-1.kiro.dev" {
+		if r.Header.Get("Authorization") != "Bearer tok" || r.Host != "runtime.eu-central-1.kiro.dev" {
 			w.WriteHeader(403)
 			return
 		}
