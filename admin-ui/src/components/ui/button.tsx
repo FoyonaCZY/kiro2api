@@ -1,55 +1,87 @@
-import * as React from 'react'
-import { Slot } from '@radix-ui/react-slot'
-import { cva, type VariantProps } from 'class-variance-authority'
+import { forwardRef, useEffect, useState, type ButtonHTMLAttributes } from 'react'
 import { cn } from '@/lib/utils'
 
-const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0',
-  {
-    variants: {
-      variant: {
-        default: 'bg-primary text-primary-foreground hover:bg-primary/90',
-        destructive:
-          'bg-destructive text-destructive-foreground hover:bg-destructive/90',
-        outline:
-          'border border-input bg-background hover:bg-accent hover:text-accent-foreground',
-        secondary:
-          'bg-secondary text-secondary-foreground hover:bg-secondary/80',
-        ghost: 'hover:bg-accent hover:text-accent-foreground',
-        link: 'text-primary underline-offset-4 hover:underline',
-      },
-      size: {
-        default: 'h-10 px-4 py-2',
-        sm: 'h-9 rounded-md px-3',
-        lg: 'h-11 rounded-md px-8',
-        icon: 'h-10 w-10',
-      },
-    },
-    defaultVariants: {
-      variant: 'default',
-      size: 'default',
-    },
-  }
-)
-
-export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof buttonVariants> {
-  asChild?: boolean
+const variants = {
+  primary: 'bg-accent text-white shadow-[0_6px_18px_-8px_var(--accent)] hover:brightness-110',
+  glass: 'glass text-fg hover:bg-[var(--glass-strong)]',
+  tinted: 'bg-fill text-fg hover:bg-fill-strong',
+  plain: 'text-fg2 hover:bg-fill hover:text-fg',
+  link: 'text-accent hover:bg-fill',
+  danger: 'bg-fill text-bad hover:bg-fill-strong',
+  solidDanger: 'bg-bad text-white hover:brightness-110',
 }
 
-const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
-    const Comp = asChild ? Slot : 'button'
-    return (
-      <Comp
-        className={cn(buttonVariants({ variant, size, className }))}
-        ref={ref}
-        {...props}
-      />
-    )
-  }
-)
-Button.displayName = 'Button'
+const sizes = {
+  xs: 'h-7 px-2.5 text-[12px] rounded-[7px]',
+  sm: 'h-8 px-3 text-[13px] rounded-[8px]',
+  md: 'h-9 px-4 text-[14px] rounded-[9px]',
+  icon: 'h-8 w-8 rounded-[8px]',
+  iconXs: 'h-7 w-7 rounded-[7px]',
+}
 
-export { Button, buttonVariants }
+export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: keyof typeof variants
+  size?: keyof typeof sizes
+}
+
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { variant = 'tinted', size = 'sm', className, type = 'button', ...props },
+  ref,
+) {
+  return (
+    <button
+      ref={ref}
+      type={type}
+      className={cn(
+        'inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap font-medium transition duration-150 active:scale-[.98] disabled:pointer-events-none disabled:opacity-40',
+        variants[variant],
+        sizes[size],
+        className,
+      )}
+      {...props}
+    />
+  )
+})
+
+/** 危险操作的两步确认：点一次变红，三秒内再点才执行 */
+export function ConfirmButton({
+  onConfirm,
+  children,
+  confirmText = '确认删除',
+  size = 'sm',
+  className,
+  disabled,
+}: {
+  onConfirm: () => void
+  children: React.ReactNode
+  confirmText?: string
+  size?: ButtonProps['size']
+  className?: string
+  disabled?: boolean
+}) {
+  const [armed, setArmed] = useState(false)
+  useEffect(() => {
+    if (!armed) return
+    const t = setTimeout(() => setArmed(false), 3000)
+    return () => clearTimeout(t)
+  }, [armed])
+  return (
+    <Button
+      size={size}
+      disabled={disabled}
+      variant={armed ? 'solidDanger' : 'danger'}
+      className={className}
+      onClick={(event) => {
+        event.stopPropagation()
+        if (armed) {
+          setArmed(false)
+          onConfirm()
+        } else {
+          setArmed(true)
+        }
+      }}
+    >
+      {armed ? confirmText : children}
+    </Button>
+  )
+}

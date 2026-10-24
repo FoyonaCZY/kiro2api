@@ -2,60 +2,148 @@
 @tailwind components;
 @tailwind utilities;
 
-@layer base {
-  :root {
-    --background: 40 18% 96%;
-    --foreground: 30 8% 12%;
-    --card: 40 20% 99%;
-    --card-foreground: 30 8% 12%;
-    --popover: 40 20% 99%;
-    --popover-foreground: 30 8% 12%;
-    --primary: 32 32% 32%;
-    --primary-foreground: 40 20% 96%;
-    --secondary: 36 14% 92%;
-    --secondary-foreground: 30 8% 16%;
-    --muted: 36 14% 92%;
-    --muted-foreground: 30 6% 38%;
-    --accent: 36 18% 90%;
-    --accent-foreground: 30 8% 16%;
-    --destructive: 4 55% 42%;
-    --destructive-foreground: 40 20% 96%;
-    --border: 34 12% 84%;
-    --input: 34 12% 84%;
-    --ring: 32 28% 38%;
-    --radius: 0.7rem;
-  }
+:root {
+  color-scheme: light;
+  --bg: #eef1f6;
+  --fg: #1d1d1f;
+  --fg2: rgba(60, 60, 67, 0.68);
+  --fg3: rgba(60, 60, 67, 0.34);
+  --accent: #007aff;
+  --ok: #34c759;
+  --warn: #ff9500;
+  --bad: #ff3b30;
+  --line: rgba(60, 60, 67, 0.12);
+  --fill: rgba(120, 120, 128, 0.12);
+  --fill-strong: rgba(120, 120, 128, 0.2);
+  --thumb: #ffffff;
+  --glass: rgba(255, 255, 255, 0.52);
+  --glass-strong: rgba(255, 255, 255, 0.8);
+  --glass-rim: rgba(255, 255, 255, 0.95);
+  --glass-shadow: 0 1px 2px rgba(20, 30, 60, 0.05), 0 18px 48px -18px rgba(30, 45, 90, 0.22);
+  --wall-1: #bcd3ff;
+  --wall-2: #ffd6e6;
+  --wall-3: #c8f0e4;
+  --wall-4: #fff1c9;
+}
 
-  .dark {
-    --background: 0 0% 12%;
-    --foreground: 40 18% 94%;
-    --card: 0 0% 15%;
-    --card-foreground: 40 18% 94%;
-    --popover: 0 0% 16%;
-    --popover-foreground: 40 18% 94%;
-    --primary: 36 38% 61%;
-    --primary-foreground: 0 0% 12%;
-    --secondary: 0 0% 18%;
-    --secondary-foreground: 40 14% 88%;
-    --muted: 0 0% 18%;
-    --muted-foreground: 36 6% 62%;
-    --accent: 0 0% 20%;
-    --accent-foreground: 40 18% 94%;
-    --destructive: 4 42% 48%;
-    --destructive-foreground: 40 18% 94%;
-    --border: 0 0% 23%;
-    --input: 0 0% 23%;
-    --ring: 36 38% 61%;
-  }
+.dark {
+  color-scheme: dark;
+  --bg: #090a10;
+  --fg: #f5f5f7;
+  --fg2: rgba(235, 235, 245, 0.62);
+  --fg3: rgba(235, 235, 245, 0.3);
+  --accent: #0a84ff;
+  --ok: #30d158;
+  --warn: #ff9f0a;
+  --bad: #ff453a;
+  --line: rgba(255, 255, 255, 0.08);
+  --fill: rgba(118, 118, 128, 0.2);
+  --fill-strong: rgba(118, 118, 128, 0.32);
+  --thumb: rgba(255, 255, 255, 0.2);
+  --glass: rgba(255, 255, 255, 0.06);
+  --glass-strong: rgba(30, 32, 40, 0.72);
+  --glass-rim: rgba(255, 255, 255, 0.26);
+  --glass-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.75);
+  --wall-1: #22378a;
+  --wall-2: #55286a;
+  --wall-3: #0c4f55;
+  --wall-4: #3a2a10;
 }
 
 @layer base {
-  * {
-    @apply border-border;
+  html {
+    -webkit-tap-highlight-color: transparent;
   }
   body {
-    @apply bg-background text-foreground antialiased;
-    font-family: Inter, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-    font-feature-settings: "rlig" 1, "calt" 1;
+    @apply font-sans text-fg antialiased;
+    min-height: 100vh;
+    font-size: 14px;
+    letter-spacing: -0.005em;
+    background:
+      radial-gradient(55vw 55vw at 0% 0%, var(--wall-1), transparent 62%),
+      radial-gradient(45vw 45vw at 100% 8%, var(--wall-2), transparent 62%),
+      radial-gradient(50vw 45vw at 85% 100%, var(--wall-3), transparent 62%),
+      radial-gradient(40vw 40vw at 10% 95%, var(--wall-4), transparent 62%),
+      var(--bg);
+    background-attachment: fixed;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--fill-strong) transparent;
+  }
+}
+
+@layer components {
+  /* 液态玻璃：半透明底 + 背景模糊 + 一圈高光描边 */
+  .glass {
+    position: relative;
+    background: var(--glass);
+    -webkit-backdrop-filter: blur(30px) saturate(180%);
+    backdrop-filter: blur(30px) saturate(180%);
+    box-shadow: var(--glass-shadow);
+  }
+  .glass::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(155deg, var(--glass-rim), transparent 32%, transparent 68%, var(--glass-rim));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+  .glass-strong {
+    background: var(--glass-strong);
+  }
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@keyframes sheet-in {
+  from { opacity: 0; transform: translateX(28px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes sheet-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateX(28px) scale(0.98); }
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes rise-in {
+  from { opacity: 0; transform: translate(-50%, 16px) scale(0.96); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.sheet[data-state='open'] { animation: sheet-in 0.34s cubic-bezier(0.2, 0.9, 0.25, 1.05); }
+.sheet[data-state='closed'] { animation: sheet-out 0.18s ease-in forwards; }
+.overlay[data-state='open'] { animation: fade-in 0.2s ease-out; }
+.overlay[data-state='closed'] { animation: fade-out 0.18s ease-in forwards; }
+.pop[data-state='open'] { animation: pop-in 0.16s ease-out; }
+.rise { animation: rise-in 0.3s cubic-bezier(0.2, 0.9, 0.25, 1.05); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
   }
 }

@@ -3,15 +3,15 @@
   <head>
     <script>
       try {
-        if (localStorage.getItem('kiro-admin-theme') !== 'light') {
-          document.documentElement.classList.add('dark')
-        }
+        var saved = localStorage.getItem('kiro-admin-theme')
+        var dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches
+        if (dark) document.documentElement.classList.add('dark')
       } catch (e) {}
     </script>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Kiro Admin</title>
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>kiro2api</title>
   </head>
   <body>
     <div id="root"></div>

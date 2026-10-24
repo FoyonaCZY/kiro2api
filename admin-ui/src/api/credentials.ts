@@ -1,5 +1,4 @@
-import axios from 'axios'
-import { storage } from '@/lib/storage'
+import { api } from '@/api/client'
 import type {
   CredentialsStatusResponse,
   BalanceResponse,
@@ -9,23 +8,6 @@ import type {
   AddCredentialRequest,
   AddCredentialResponse,
 } from '@/types/api'
-
-// 创建 axios 实例
-const api = axios.create({
-  baseURL: '/api/admin',
-  headers: {
-    'Content-Type': 'application/json',
-  },
-})
-
-// 请求拦截器添加 API Key
-api.interceptors.request.use((config) => {
-  const apiKey = storage.getApiKey()
-  if (apiKey) {
-    config.headers['x-api-key'] = apiKey
-  }
-  return config
-})
 
 // 获取所有凭据状态
 export async function getCredentials(): Promise<CredentialsStatusResponse> {
