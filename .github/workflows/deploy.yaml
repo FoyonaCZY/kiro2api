@@ -28,8 +28,8 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           password: ${{ secrets.DEPLOY_PASSWORD }}
           port: 22
-          source: kiro2api.tar.gz,docker-compose.deploy.yml
-          target: /home/ubuntu/kiro-deploy
+          source: kiro2api.tar.gz,docker-compose.deploy.yml,Caddyfile
+          target: /opt/kiro-deploy
           overwrite: true
 
       - name: Load image and restart
@@ -41,14 +41,18 @@ jobs:
           port: 22
           script: |
             set -euo pipefail
-            # 沿用 kiro.rs 的数据目录，accounts/usage/access.sqlite 直接接管
-            DATA=/home/ubuntu/kiro.rs
+            if [ "$(id -u)" -eq 0 ]; then DOCKER=docker; else DOCKER="sudo docker"; fi
+            DATA=/opt/kiro2api
             mkdir -p "$DATA/config"
-            gunzip -c /home/ubuntu/kiro-deploy/kiro2api.tar.gz | sudo docker load
-            cp /home/ubuntu/kiro-deploy/docker-compose.deploy.yml "$DATA/docker-compose.kiro2api.yml"
-            # 旧的 kiro-rs 容器占着 8990，先停掉（保留容器和镜像，方便回滚）
-            if sudo docker ps -q --filter name=^kiro-rs$ | grep -q .; then sudo docker stop kiro-rs; fi
+            if [ ! -f "$DATA/config/config.json" ]; then
+              echo "缺少 $DATA/config/config.json，先放好配置再部署" >&2
+              exit 1
+            fi
+            gunzip -c /opt/kiro-deploy/kiro2api.tar.gz | $DOCKER load
+            cp /opt/kiro-deploy/docker-compose.deploy.yml "$DATA/docker-compose.kiro2api.yml"
+            cp /opt/kiro-deploy/Caddyfile "$DATA/Caddyfile"
+            if $DOCKER ps -q --filter name=^kiro-rs$ | grep -q .; then $DOCKER stop kiro-rs; fi
             cd "$DATA"
-            sudo docker compose -p kiro2api -f docker-compose.kiro2api.yml up -d --force-recreate
-            sudo docker ps --filter name=kiro2api
-            rm -f /home/ubuntu/kiro-deploy/kiro2api.tar.gz
+            $DOCKER compose -p kiro2api -f docker-compose.kiro2api.yml up -d --force-recreate
+            $DOCKER ps --filter name=kiro2api
+            rm -f /opt/kiro-deploy/kiro2api.tar.gz

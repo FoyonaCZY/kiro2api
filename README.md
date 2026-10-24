@@ -36,7 +36,7 @@ go vet ./... && go test ./...
 
 `Deploy` 工作流只能在 Actions 页面手动运行，需要仓库 Secrets：`DEPLOY_HOST`、`DEPLOY_USER`、`DEPLOY_PASSWORD`。
 
-它在服务器上构建并启动 `kiro2api` 容器，数据目录沿用 `/home/ubuntu/kiro.rs/config`。启动前会停掉旧的 `kiro-rs` 容器（不删除），端口仍是 `127.0.0.1:8990`。回滚：`docker stop kiro2api && docker start kiro-rs`，两边读写的是同一份库，格式互通。
+它在 `103.245.231.162` 上启动 `kiro2api`，数据目录是 `/opt/kiro2api/config`。Caddy 把 `https://kiro.skd.moe` 反代到本机 `127.0.0.1:8990`。第一次部署前，这个目录里要已经有 `config.json`。
 
 ## 与 kiro.rs 的差异
 
