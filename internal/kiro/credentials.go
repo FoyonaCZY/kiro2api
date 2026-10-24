@@ -78,12 +78,22 @@ func (c *Credentials) EffectiveAuthRegion(cfg *config.Config) string {
 	return cfg.EffectiveAuthRegion()
 }
 
-// EffectiveAPIRegion 凭据.apiRegion > 全局；凭据.region 不参与。
+// EffectiveAPIRegion 对齐 Kiro IDE：凭据.apiRegion > profileArn 里的区域 > 全局 apiRegion > 凭据.region > 全局 region。
+// profileArn 所在区域以外的 runtime / management 会直接回 400。
 func (c *Credentials) EffectiveAPIRegion(cfg *config.Config) string {
 	if c.APIRegion != "" {
 		return c.APIRegion
 	}
-	return cfg.EffectiveAPIRegion()
+	if r := ProfileArnRegion(c.ProfileArn); r != "" {
+		return r
+	}
+	if cfg.APIRegion != "" {
+		return cfg.APIRegion
+	}
+	if c.Region != "" {
+		return c.Region
+	}
+	return cfg.Region
 }
 
 // EffectiveProxy 凭据代理 > 全局代理；direct 表示直连。
@@ -151,14 +161,16 @@ func ClaudeMessagesURL(base string) (string, error) {
 	return base + "/v1/messages", nil
 }
 
-// UpstreamTokenType Q API 的 TokenType；Social 不发送。
+// UpstreamTokenType Kiro Agent 发给 runtime / management 的 TokenType；Social 不发送。
 func (c *Credentials) UpstreamTokenType() string {
 	if c.IsAPIKey() {
 		return "API_KEY"
 	}
 	switch strings.ToLower(c.AuthMethod) {
-	case "idc":
+	case "idc", "builder-id", "iam":
 		return "SSO_OIDC"
+	case "machine_token":
+		return "KIRO_MACHINE_TOKEN"
 	case "external_idp":
 		return "EXTERNAL_IDP"
 	}

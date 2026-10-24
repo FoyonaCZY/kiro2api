@@ -16,13 +16,26 @@ func MarshalNoEscape(v any) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
-// 以下结构与 kiro.rs 的 Kiro 请求模型字段和顺序一致。
+// 以下是 anthropic 包交给 provider 的内部信封，provider 选定凭据后再转成 /v1/responses。
 
 // KiroRequest 请求根。
 type KiroRequest struct {
 	ConversationState ConversationState `json:"conversationState"`
 	ProfileArn        string            `json:"profileArn,omitempty"`
 	Instructions      string            `json:"instructions,omitempty"`
+	// CallPosition 本轮用户输入后第几次调用模型（0 起），决定 x-kiro-attempt 的预算。
+	CallPosition int `json:"callPosition,omitempty"`
+	// HasSystem 历史第一对消息是系统提示和确认语。
+	HasSystem bool `json:"hasSystem,omitempty"`
+	// Thinking 客户端要求的思考方式；模型支持原生 reasoning 时用 reasoning 字段，否则退回提示词标签。
+	Thinking *ThinkingRequest `json:"thinking,omitempty"`
+}
+
+// ThinkingRequest 思考配置。Prefix 是退回提示词方案时要加的标签。
+type ThinkingRequest struct {
+	Enabled bool   `json:"enabled,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Prefix  string `json:"prefix,omitempty"`
 }
 
 // ConversationState 对话状态。
@@ -111,8 +124,16 @@ type UserMessage struct {
 
 // AssistantMessage 历史里的助手消息。
 type AssistantMessage struct {
-	Content  string         `json:"content"`
-	ToolUses []ToolUseEntry `json:"toolUses,omitempty"`
+	Content   string            `json:"content"`
+	ToolUses  []ToolUseEntry    `json:"toolUses,omitempty"`
+	Reasoning *ReasoningContent `json:"reasoning,omitempty"`
+}
+
+// ReasoningContent 上一轮的思考内容。带签名（或 redacted）的才能按原生 reasoning 回放。
+type ReasoningContent struct {
+	Text      string `json:"text,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	Redacted  string `json:"redacted,omitempty"`
 }
 
 // KiroTool 工具定义。

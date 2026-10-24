@@ -7,10 +7,14 @@ Anthropic Messages 兼容网关。后端是一池 Kiro 账号和 Claude Messages
 ## 功能
 
 - `/v1/messages`、`/v1/messages/count_tokens`、`/v1/models`；`/cc/v1/messages` 缓冲到流结束，用 `contextUsageEvent` 的准确值写 `message_start`
-- Kiro 端点：对齐 1.4.26。对话打 `runtime.{region}.kiro.dev/v1/responses`，MCP 仍是同主机的 `/mcp`。凭据上的 `krs` / `ide` 名字还保留；Social / IdC 刷新、`invalid_grant` 立即停用
+- Kiro 端点和指纹：按 Kiro IDE 1.4.26 自己的客户端代码抓包对齐（头的大小写、顺序、UA、HTTP/1.1 keep-alive、TLS ClientHello）
+  - 对话 `runtime.{region}.kiro.dev/v1/responses`；WebSearch 走 `KiroRuntimeService.InvokeMCP`；额度 `management.{region}.kiro.dev/getUsageLimits`；模型列表 `KiroControlPlaneBearerService.ListAvailableModels`
+  - region 和 IDE 一样从 profileArn 里取，凭据的 `apiRegion` 可以覆盖；Social 登录和刷新固定 `prod.us-east-1.auth.desktop.kiro.dev`
+  - 模型声明了思考开关时用 `reasoning` 字段并按签名回放历史思考，否则退回提示词标签
+  - 凭据上的 `krs` / `ide` 名字还保留，两者请求完全相同；`invalid_grant` 立即停用
 - Claude Messages API 账号：请求和响应原样双向透传；同一请求里每个账号只试一次，超时和 5xx 只换号
 - 接入 Key 和调度分组；限流冷却、连续失败停用、全组自动禁用后自愈
-- 模拟 prompt cache 计费（按接入 Key 隔离）；单价、账号人民币成本和成本倍率，改价后历史按新价重算；失败和断流请求不计费
+- 模拟 prompt cache 计费（按接入 Key 隔离）；单价、账号人民币成本和成本倍率，改价后历史按新价重算；失败和断流请求不计费；另记上游 usage 实际报的 kiro:credits（按请求、模型、账号汇总，账号可看 ¥/credit）
 - 凭据存 `accounts.sqlite`，管理端修改立即生效；凭据级 SOCKS5 / HTTP 代理，`direct` 表示直连
 
 ## 本地运行
@@ -40,7 +44,7 @@ go vet ./... && go test ./...
 
 ## 与 kiro.rs 的差异
 
-- `tlsBackend` 配置项不再使用，统一用 Go 标准库 TLS
+- `tlsBackend` 配置项不再使用；Kiro 上游统一用 utls 复刻 Kiro IDE（Electron 44 / Node 24.21.0）的 ClientHello，`kasVersion` 跟随 IDE 内置的 Kiro Agent 版本
 - 客户端先断开的流式请求记为 499（不计费），原来不记录
 - 非流式响应里遇到损坏帧会跳过继续解析，原来会停在损坏帧
 - 日志不再打印任何一段 `apiKey`

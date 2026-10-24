@@ -2,11 +2,12 @@ package anthropic
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/FoyonaCZY/kiro2api/internal/kiro"
@@ -17,7 +18,7 @@ const (
 	writeToolSuffix   = "- IMPORTANT: If the content to write exceeds 150 lines, you MUST only write the first 50 lines using this tool, then use `Edit` tool to append the remaining content in chunks of no more than 50 lines each. If needed, leave a unique placeholder to help append content. Do NOT attempt to write all content at once."
 	editToolSuffix    = "- IMPORTANT: If the `new_string` content exceeds 50 lines, you MUST split it into multiple Edit calls, each replacing no more than 50 lines at a time. If used to append content, leave a unique placeholder to help append content. On the final chunk, do NOT include the placeholder."
 	systemChunkPolicy = "When the Write or Edit tool has content size limits, always comply silently. Never suggest bypassing these limits via alternative tools. Never ask the user whether to switch approaches. Complete all chunked operations without commentary."
-	toolNameMaxLen    = 63
+	toolNameMaxLen    = 64
 )
 
 // MapModel claude-{sonnet|opus|haiku}-X[-Y] → claude-family-X.Y；去掉 -thinking 和日期后缀。未知模型返回空。
@@ -88,11 +89,14 @@ func (e *ConversionError) Error() string {
 	return "模型不支持: " + e.Unsupported
 }
 
-// ConversionResult 转换结果。ToolNameMap 为短名 → 原名。
+// ConversionResult 转换结果。ToolNameMap 为改写后的工具名 → 原名。
 type ConversionResult struct {
 	State        kiro.ConversationState
 	Instructions string
 	ToolNameMap  map[string]string
+	CallPosition int
+	HasSystem    bool
+	Thinking     *kiro.ThinkingRequest
 }
 
 func normalizeSchema(raw json.RawMessage) json.RawMessage {
@@ -141,60 +145,6 @@ func ExtractSessionID(userID string) string {
 		}
 	}
 	return ""
-}
-
-func placeholderTool(name string) kiro.KiroTool {
-	return kiro.KiroTool{ToolSpecification: kiro.ToolSpecification{
-		Name:        name,
-		Description: "Tool used in conversation history",
-		InputSchema: kiro.InputSchema{JSON: json.RawMessage(`{"$schema":"http://json-schema.org/draft-07/schema#","additionalProperties":true,"properties":{},"required":[],"type":"object"}`)},
-	}}
-}
-
-func shortenToolName(name string) string {
-	sum := sha256.Sum256([]byte(name))
-	h := hex.EncodeToString(sum[:])[:8]
-	prefixMax := toolNameMaxLen - 1 - 8
-	prefix := name
-	if utf8.RuneCountInString(name) > prefixMax {
-		prefix = string([]rune(name)[:prefixMax])
-	}
-	return prefix + "_" + h
-}
-
-func mapToolName(name string, m map[string]string) string {
-	if len(name) <= toolNameMaxLen {
-		return name
-	}
-	s := shortenToolName(name)
-	m[s] = name
-	return s
-}
-
-func truncateRunes(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
-		return s
-	}
-	return string([]rune(s)[:n])
-}
-
-func convertTools(tools []Tool, m map[string]string) []kiro.KiroTool {
-	out := make([]kiro.KiroTool, 0, len(tools))
-	for _, t := range tools {
-		desc := t.Description
-		switch t.Name {
-		case "Write":
-			desc += "\n" + writeToolSuffix
-		case "Edit":
-			desc += "\n" + editToolSuffix
-		}
-		out = append(out, kiro.KiroTool{ToolSpecification: kiro.ToolSpecification{
-			Name:        mapToolName(t.Name, m),
-			Description: truncateRunes(desc, 10000),
-			InputSchema: kiro.InputSchema{JSON: normalizeSchema(t.InputSchema)},
-		}})
-	}
-	return out
 }
 
 func imageFormat(mt string) string {
@@ -315,8 +265,130 @@ func hasThinkingTags(s string) bool {
 	return strings.Contains(s, "<thinking_mode>") || strings.Contains(s, "<max_thinking_length>")
 }
 
+func placeholderTool(name string) kiro.KiroTool {
+	return kiro.KiroTool{ToolSpecification: kiro.ToolSpecification{
+		Name:        name,
+		Description: "Tool used in conversation history",
+		InputSchema: kiro.InputSchema{JSON: json.RawMessage(`{"$schema":"http://json-schema.org/draft-07/schema#","additionalProperties":true,"properties":{},"required":[],"type":"object"}`)},
+	}}
+}
+
+// toolNamer 照 Kiro IDE 处理工具名：只允许 [A-Za-z0-9_-] 且不超过 64 字符，其他字符换成 _，
+// 截断后撞名加 _1、_2。rev 记录改过的名字，回包时换回原名。
+type toolNamer struct {
+	used map[string]bool
+	fwd  map[string]string
+	rev  map[string]string
+}
+
+func newToolNamer() *toolNamer {
+	return &toolNamer{used: map[string]bool{}, fwd: map[string]string{}, rev: map[string]string{}}
+}
+
+func validToolName(s string) bool {
+	if s == "" || len(s) > toolNameMaxLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func sanitizeToolName(name string) string {
+	if validToolName(name) {
+		return name
+	}
+	var b strings.Builder
+	for _, r := range name {
+		if r < 0x80 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			b.WriteRune(r)
+		} else {
+			// JS 的 replace 按 UTF-16 码元替换，BMP 外的字符算两个。
+			b.WriteString(strings.Repeat("_", len(utf16.Encode([]rune{r}))))
+		}
+	}
+	s := b.String()
+	if len(s) > toolNameMaxLen {
+		s = s[:toolNameMaxLen]
+	}
+	if s == "" {
+		return "tool"
+	}
+	return s
+}
+
+func (n *toolNamer) name(orig string) string {
+	if s, ok := n.fwd[orig]; ok {
+		return s
+	}
+	s := sanitizeToolName(orig)
+	if n.used[s] {
+		base := s
+		for i := 1; ; i++ {
+			suffix := "_" + strconv.Itoa(i)
+			s = base[:min(len(base), toolNameMaxLen-len(suffix))] + suffix
+			if !n.used[s] {
+				break
+			}
+		}
+	}
+	n.used[s] = true
+	n.fwd[orig] = s
+	if s != orig {
+		n.rev[s] = orig
+	}
+	return s
+}
+
+func truncateRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n])
+}
+
+// toolDescription 空描述用工具名，再空用 tool，与 IDE 一致。
+func toolDescription(desc, name string) string {
+	switch {
+	case strings.TrimSpace(desc) != "":
+		return desc
+	case strings.TrimSpace(name) != "":
+		return name
+	}
+	return "tool"
+}
+
+func convertTools(tools []Tool, names *toolNamer) []kiro.KiroTool {
+	out := make([]kiro.KiroTool, 0, len(tools))
+	for _, t := range tools {
+		desc := toolDescription(t.Description, t.Name)
+		switch t.Name {
+		case "Write":
+			desc += "\n" + writeToolSuffix
+		case "Edit":
+			desc += "\n" + editToolSuffix
+		}
+		out = append(out, kiro.KiroTool{ToolSpecification: kiro.ToolSpecification{
+			Name:        names.name(t.Name),
+			Description: truncateRunes(desc, 10000),
+			InputSchema: kiro.InputSchema{JSON: normalizeSchema(t.InputSchema)},
+		}})
+	}
+	return out
+}
+
+// alternationFiller 两条用户消息之间没有助手回复时，Kiro IDE 插入的占位回复。
+const alternationFiller = "(No assistant response was recorded for the preceding turn. This placeholder was inserted automatically to preserve message alternation — it is not a reply the assistant produced.)"
+
+// toolFailedText 工具调用没有结果时 IDE 补的错误结果。
+const toolFailedText = "Tool execution failed"
+
 func userHistory(content, model string) kiro.HistoryMessage {
-	return kiro.HistoryMessage{User: &kiro.UserMessage{Content: content, ModelID: model, Origin: "AI_EDITOR"}}
+	return kiro.HistoryMessage{User: &kiro.UserMessage{Content: content, ModelID: model, Origin: kiro.OriginIDE}}
 }
 
 func assistantHistory(content string) kiro.HistoryMessage {
@@ -335,15 +407,16 @@ func mergeUser(msgs []Message, model string) kiro.HistoryMessage {
 		images = append(images, im...)
 		results = append(results, tr...)
 	}
-	u := &kiro.UserMessage{Content: strings.Join(parts, "\n"), ModelID: model, Origin: "AI_EDITOR", Images: images}
+	u := &kiro.UserMessage{Content: strings.Join(parts, "\n"), ModelID: model, Origin: kiro.OriginIDE, Images: images}
 	if len(results) > 0 {
 		u.UserInputMessageContext = &kiro.UserInputMessageContext{ToolResults: results}
 	}
 	return kiro.HistoryMessage{User: u}
 }
 
-func convertAssistant(m Message, names map[string]string) *kiro.AssistantMessage {
+func convertAssistant(m Message, names *toolNamer) *kiro.AssistantMessage {
 	var thinking, text strings.Builder
+	var signature, redacted string
 	var uses []kiro.ToolUseEntry
 	s, isStr, blocks := ParseBlocks(m.Content)
 	if isStr {
@@ -353,6 +426,13 @@ func convertAssistant(m Message, names map[string]string) *kiro.AssistantMessage
 		switch b.Type {
 		case "thinking":
 			thinking.WriteString(str(b.Thinking))
+			if signature == "" {
+				signature = str(b.Signature)
+			}
+		case "redacted_thinking":
+			if redacted == "" {
+				redacted = str(b.Data)
+			}
 		case "text":
 			text.WriteString(str(b.Text))
 		case "tool_use":
@@ -361,70 +441,81 @@ func convertAssistant(m Message, names map[string]string) *kiro.AssistantMessage
 				if len(in) == 0 || string(in) == "null" {
 					in = json.RawMessage(`{}`)
 				}
-				uses = append(uses, kiro.ToolUseEntry{ToolUseID: *b.ID, Name: mapToolName(*b.Name, names), Input: in})
+				uses = append(uses, kiro.ToolUseEntry{ToolUseID: *b.ID, Name: names.name(*b.Name), Input: in})
 			}
 		}
 	}
-	content := text.String()
+	a := &kiro.AssistantMessage{Content: text.String(), ToolUses: uses}
 	switch {
-	case thinking.Len() > 0 && content != "":
-		content = "<thinking>" + thinking.String() + "</thinking>\n\n" + content
 	case thinking.Len() > 0:
-		content = "<thinking>" + thinking.String() + "</thinking>"
-	case content == "" && len(uses) > 0:
-		content = " " // Kiro 不接受空 content
+		a.Reasoning = &kiro.ReasoningContent{Text: thinking.String(), Signature: signature}
+	case redacted != "":
+		a.Reasoning = &kiro.ReasoningContent{Redacted: redacted}
 	}
-	return &kiro.AssistantMessage{Content: content, ToolUses: uses}
+	return a
 }
 
-func mergeAssistant(msgs []Message, names map[string]string) kiro.HistoryMessage {
+func mergeAssistant(msgs []Message, names *toolNamer) kiro.HistoryMessage {
 	if len(msgs) == 1 {
 		return kiro.HistoryMessage{Assistant: convertAssistant(msgs[0], names)}
 	}
-	var parts []string
+	var parts, thoughts []string
 	var uses []kiro.ToolUseEntry
+	var reasoning *kiro.ReasoningContent
 	for _, m := range msgs {
 		a := convertAssistant(m, names)
 		if strings.TrimSpace(a.Content) != "" {
 			parts = append(parts, a.Content)
 		}
+		if a.Reasoning != nil {
+			if reasoning == nil {
+				reasoning = a.Reasoning
+			}
+			if a.Reasoning.Text != "" {
+				thoughts = append(thoughts, a.Reasoning.Text)
+			}
+		}
 		uses = append(uses, a.ToolUses...)
 	}
-	content := strings.Join(parts, "\n\n")
-	if len(parts) == 0 && len(uses) > 0 {
-		content = " "
+	// 多段思考合并后签名对不上，只保留文本。
+	if len(thoughts) > 1 {
+		reasoning = &kiro.ReasoningContent{Text: strings.Join(thoughts, "\n\n")}
 	}
-	return kiro.HistoryMessage{Assistant: &kiro.AssistantMessage{Content: content, ToolUses: uses}}
+	return kiro.HistoryMessage{Assistant: &kiro.AssistantMessage{Content: strings.Join(parts, "\n\n"), ToolUses: uses, Reasoning: reasoning}}
 }
 
-func systemInstructions(req *MessagesRequest) string {
-	prefix := thinkingPrefix(req)
-	var sys string
-	if len(req.System) > 0 {
-		texts := make([]string, len(req.System))
-		for i, s := range req.System {
-			texts[i] = s.Text
-		}
-		sys = strings.Join(texts, "\n")
-		if sys != "" {
-			sys += "\n" + systemChunkPolicy
-		}
+// systemPrompt 系统提示正文（不含思考标签，标签由 provider 按模型决定加不加）。
+func systemPrompt(req *MessagesRequest) string {
+	if len(req.System) == 0 {
+		return ""
 	}
-	if prefix != "" && !hasThinkingTags(sys) {
-		if sys != "" {
-			sys = prefix + "\n" + sys
-		} else {
-			sys = prefix
-		}
+	texts := make([]string, len(req.System))
+	for i, s := range req.System {
+		texts[i] = s.Text
+	}
+	sys := strings.Join(texts, "\n")
+	if sys != "" {
+		sys += "\n" + systemChunkPolicy
 	}
 	return sys
 }
 
-func buildHistory(req *MessagesRequest, msgs []Message, model string, names map[string]string) []kiro.HistoryMessage {
+func thinkingRequest(req *MessagesRequest) *kiro.ThinkingRequest {
+	t := &kiro.ThinkingRequest{Enabled: req.Thinking.Enabled(), Prefix: thinkingPrefix(req)}
+	if req.OutputConfig != nil {
+		t.Effort = req.OutputConfig.Effort
+	}
+	if !t.Enabled && t.Effort == "" && t.Prefix == "" {
+		return nil
+	}
+	return t
+}
+
+func buildHistory(sys string, msgs []Message, model string, names *toolNamer) []kiro.HistoryMessage {
 	var history []kiro.HistoryMessage
-	if sys := systemInstructions(req); sys != "" {
+	if sys != "" {
 		// 免费账号的 /v1/responses 拒绝 instructions（systemPrompt 未开通）。系统提示放进对话，和客户端实验关闭时一样。
-		history = append(history, userHistory(sys, model), assistantHistory("I will follow these instructions."))
+		history = append(history, userHistory(sys, model), assistantHistory(kiro.SystemAck))
 	}
 	var ub, ab []Message
 	for _, m := range msgs[:len(msgs)-1] {
@@ -447,7 +538,7 @@ func buildHistory(req *MessagesRequest, msgs []Message, model string, names map[
 		history = append(history, mergeAssistant(ab, names))
 	}
 	if len(ub) > 0 {
-		history = append(history, mergeUser(ub, model), assistantHistory("OK"))
+		history = append(history, mergeUser(ub, model), assistantHistory(alternationFiller))
 	}
 	return history
 }
@@ -486,36 +577,95 @@ func validateToolPairing(history []kiro.HistoryMessage, results []kiro.ToolResul
 			slog.Warn("跳过孤立的 tool_result：找不到对应的 tool_use", "tool_use_id", r.ToolUseID)
 		}
 	}
-	for id := range unpaired {
-		slog.Warn("检测到孤立的 tool_use，将从历史中移除", "tool_use_id", id)
-	}
 	return out, unpaired
 }
 
-func removeOrphanedToolUses(history []kiro.HistoryMessage, orphaned map[string]bool) {
-	if len(orphaned) == 0 {
-		return
+func failedResult(id string) kiro.ToolResult {
+	return kiro.ToolResult{ToolUseID: id, Content: []map[string]any{{"text": toolFailedText}}, Status: "error", IsError: true}
+}
+
+// fillMissingToolResults 没拿到结果的工具调用照 IDE 补一条失败结果：下一条用户消息已带结果就并进去，
+// 否则在它前面插一条只有失败结果的用户消息，再接占位回复保持交替。
+func fillMissingToolResults(history []kiro.HistoryMessage, cur *kiro.UserInputMessage, missing map[string]bool) []kiro.HistoryMessage {
+	if len(missing) == 0 {
+		return history
 	}
-	for _, h := range history {
-		if h.Assistant == nil || len(h.Assistant.ToolUses) == 0 {
+	out := make([]kiro.HistoryMessage, 0, len(history)+2)
+	for i, h := range history {
+		out = append(out, h)
+		if h.Assistant == nil {
 			continue
 		}
-		kept := h.Assistant.ToolUses[:0]
+		var ids []string
 		for _, u := range h.Assistant.ToolUses {
-			if !orphaned[u.ToolUseID] {
-				kept = append(kept, u)
+			if missing[u.ToolUseID] {
+				ids = append(ids, u.ToolUseID)
+				slog.Warn("tool_use 没有对应结果，补一条失败结果", "tool_use_id", u.ToolUseID)
 			}
 		}
-		if len(kept) == 0 {
-			kept = nil
+		if len(ids) == 0 {
+			continue
 		}
-		h.Assistant.ToolUses = kept
+		var nextCtx *kiro.UserInputMessageContext
+		if i+1 < len(history) {
+			if u := history[i+1].User; u != nil && u.UserInputMessageContext != nil && len(u.UserInputMessageContext.ToolResults) > 0 {
+				nextCtx = u.UserInputMessageContext
+			}
+		} else if len(cur.UserInputMessageContext.ToolResults) > 0 {
+			nextCtx = &cur.UserInputMessageContext
+		}
+		if nextCtx != nil {
+			for _, id := range ids {
+				nextCtx.ToolResults = append(nextCtx.ToolResults, failedResult(id))
+			}
+			continue
+		}
+		var results []kiro.ToolResult
+		for _, id := range ids {
+			results = append(results, failedResult(id))
+		}
+		out = append(out, kiro.HistoryMessage{User: &kiro.UserMessage{Origin: kiro.OriginIDE,
+			UserInputMessageContext: &kiro.UserInputMessageContext{ToolResults: results}}}, assistantHistory(alternationFiller))
 	}
+	return out
+}
+
+// turnInfo 最后一条有正文（非纯工具结果）的用户消息是第几轮，以及此后已经调用过几次模型。
+func turnInfo(msgs []Message) (turn, callPosition int) {
+	last := -1
+	for i, m := range msgs {
+		if m.Role != "user" {
+			continue
+		}
+		text, images, _ := processContent(m.Content)
+		if strings.TrimSpace(text) != "" || len(images) > 0 {
+			turn++
+			last = i
+		}
+	}
+	for _, m := range msgs[last+1:] {
+		if m.Role == "assistant" {
+			callPosition++
+		}
+	}
+	return turn, callPosition
+}
+
+// continuationID IDE 每次执行（一轮用户输入及其工具循环）生成一个随机 UUID。
+// 这里按会话和轮次派生，同一轮里的多次调用保持不变。
+func continuationID(conversationID string, turn int) string {
+	sum := sha256.Sum256([]byte(conversationID + "/continuation/" + strconv.Itoa(turn)))
+	var u uuid.UUID
+	copy(u[:], sum[:16])
+	u[6] = u[6]&0x0f | 0x40
+	u[8] = u[8]&0x3f | 0x80
+	return u.String()
 }
 
 // KiroBody 请求根；profileArn 由 provider 按实际凭据注入。
 func KiroBody(r *ConversionResult) kiro.KiroRequest {
-	return kiro.KiroRequest{ConversationState: r.State, Instructions: r.Instructions}
+	return kiro.KiroRequest{ConversationState: r.State, Instructions: r.Instructions,
+		CallPosition: r.CallPosition, HasSystem: r.HasSystem, Thinking: r.Thinking}
 }
 
 // ConvertRequest Anthropic → Kiro。
@@ -551,46 +701,53 @@ func ConvertRequest(req *MessagesRequest) (*ConversionResult, error) {
 		convID = uuid.NewString()
 	}
 	text, images, results := processContent(msgs[len(msgs)-1].Content)
-	names := map[string]string{}
+	names := newToolNamer()
 	tools := convertTools(req.Tools, names)
-	history := buildHistory(req, msgs, model, names)
-	results, orphaned := validateToolPairing(history, results)
-	removeOrphanedToolUses(history, orphaned)
-
-	existing := map[string]bool{}
-	for _, t := range tools {
-		existing[strings.ToLower(t.ToolSpecification.Name)] = true
+	sys := systemPrompt(req)
+	history := buildHistory(sys, msgs, model, names)
+	results, missing := validateToolPairing(history, results)
+	cur := kiro.UserInputMessage{
+		UserInputMessageContext: kiro.UserInputMessageContext{ToolResults: results},
+		Content:                 text,
+		ModelID:                 model,
+		Images:                  images,
+		Origin:                  kiro.OriginIDE,
 	}
-	for _, h := range history {
-		if h.Assistant == nil {
-			continue
-		}
-		for _, u := range h.Assistant.ToolUses {
-			if !existing[strings.ToLower(u.Name)] {
-				existing[strings.ToLower(u.Name)] = true
-				tools = append(tools, placeholderTool(u.Name))
+	history = fillMissingToolResults(history, &cur, missing)
+
+	// 带工具调用的历史必须有 toolConfig；请求本身没有工具时才给历史里的工具补占位定义。
+	if len(tools) == 0 {
+		seen := map[string]bool{}
+		for _, h := range history {
+			if h.Assistant == nil {
+				continue
+			}
+			for _, u := range h.Assistant.ToolUses {
+				if !seen[u.Name] {
+					seen[u.Name] = true
+					tools = append(tools, placeholderTool(u.Name))
+				}
 			}
 		}
 	}
-	if len(names) > 0 {
-		slog.Info(fmt.Sprintf("工具名称映射: %d 个超长名称已缩短", len(names)))
+	cur.UserInputMessageContext.Tools = tools
+	if len(names.rev) > 0 {
+		slog.Info(fmt.Sprintf("工具名称映射: %d 个名称按 Kiro 规则改写", len(names.rev)))
 	}
 	limitHistoryImages(history, len(images))
+	turn, callPosition := turnInfo(msgs)
 	return &ConversionResult{
 		State: kiro.ConversationState{
-			AgentContinuationID: convID,
+			AgentContinuationID: continuationID(convID, turn),
 			AgentTaskType:       "vibe",
 			ChatTriggerType:     "MANUAL",
-			CurrentMessage: kiro.CurrentMessage{UserInputMessage: kiro.UserInputMessage{
-				UserInputMessageContext: kiro.UserInputMessageContext{ToolResults: results, Tools: tools},
-				Content:                 text,
-				ModelID:                 model,
-				Images:                  images,
-				Origin:                  "AI_EDITOR",
-			}},
-			ConversationID: convID,
-			History:        history,
+			CurrentMessage:      kiro.CurrentMessage{UserInputMessage: cur},
+			ConversationID:      convID,
+			History:             history,
 		},
-		ToolNameMap: names,
+		ToolNameMap:  names.rev,
+		CallPosition: callPosition,
+		HasSystem:    sys != "",
+		Thinking:     thinkingRequest(req),
 	}, nil
 }

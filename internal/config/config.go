@@ -23,6 +23,7 @@ type Config struct {
 	AuthRegion            string                     `json:"authRegion,omitempty"`
 	APIRegion             string                     `json:"apiRegion,omitempty"`
 	KiroVersion           string                     `json:"kiroVersion"`
+	KASVersion            string                     `json:"kasVersion"`
 	MachineID             string                     `json:"machineId,omitempty"`
 	APIKey                string                     `json:"apiKey,omitempty"`
 	SystemVersion         string                     `json:"systemVersion"`
@@ -46,13 +47,14 @@ type Config struct {
 	path string
 }
 
-// Default 与 kiro.rs 的默认值相同。
+// Default 默认值。Region 跟 Kiro IDE 一样兜底 us-east-1；KASVersion 是 1.4.26 内置 Kiro Agent 的版本。
 func Default() *Config {
 	return &Config{
 		Host:                  "127.0.0.1",
 		Port:                  8080,
-		Region:                "eu-central-1",
+		Region:                "us-east-1",
 		KiroVersion:           "1.4.26",
+		KASVersion:            "0.66.56",
 		SystemVersion:         "win32#10.0.26200",
 		NodeVersion:           "24.21.0",
 		AgentMode:             "vibe",
@@ -91,14 +93,6 @@ func (c *Config) Path() string { return c.path }
 func (c *Config) EffectiveAuthRegion() string {
 	if c.AuthRegion != "" {
 		return c.AuthRegion
-	}
-	return c.Region
-}
-
-// EffectiveAPIRegion API 请求用的区域。
-func (c *Config) EffectiveAPIRegion() string {
-	if c.APIRegion != "" {
-		return c.APIRegion
 	}
 	return c.Region
 }

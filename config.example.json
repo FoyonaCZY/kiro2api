@@ -2,7 +2,7 @@
   "host": "127.0.0.1",
   "port": 8990,
   "apiKey": "sk-change-me",
-  "region": "eu-central-1",
+  "region": "us-east-1",
   "adminApiKey": "admin-change-me",
   "defaultEndpoint": "krs"
 }

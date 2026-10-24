@@ -247,6 +247,10 @@ const (
 	EvContextUsage
 	EvError
 	EvException
+	// EvReasoningSignature 原生思考结束时的签名或 redacted 内容。
+	EvReasoningSignature
+	// EvStop 上游给出的结束原因（MAX_TOKENS、CONTENT_FILTERED 等）。
+	EvStop
 )
 
 // Event 解析后的事件。
@@ -261,6 +265,11 @@ type Event struct {
 	ContextUsage float64 // contextUsagePercentage
 	Code         string  // error code / exception type
 	Message      string  // 错误正文
+	ErrorType    string  // /v1/responses 错误的 type
+	Signature    string  // EvReasoningSignature
+	Redacted     string  // EvReasoningSignature：base64 的 redacted 思考
+	StopReason   string  // EvStop
+	Credits      float64 // EvMetering：本次消耗的 credit
 }
 
 // EventFromFrame 按 :message-type / :event-type 分发。

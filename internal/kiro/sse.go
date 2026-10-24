@@ -15,6 +15,7 @@ type SSEDecoder struct {
 	held     []string
 	errCount int
 	stopped  bool
+	refusal  bool
 }
 
 type toolCall struct {
@@ -77,12 +78,18 @@ func (d *SSEDecoder) consume(line string) {
 		return
 	}
 	switch w.Type {
-	case "response.output_text.delta", "response.refusal.delta":
+	case "response.output_text.delta":
+		if w.Delta != "" {
+			d.push(&Event{Kind: EvAssistant, Content: w.Delta})
+		}
+	case "response.refusal.delta":
+		d.refusal = true
 		if w.Delta != "" {
 			d.push(&Event{Kind: EvAssistant, Content: w.Delta})
 		}
 	case "response.refusal.done":
-		if w.Refusal != "" {
+		// 和 IDE 一样：已经流过 delta 就不再重复输出完整拒答。
+		if w.Refusal != "" && !d.refusal {
 			d.push(&Event{Kind: EvAssistant, Content: w.Refusal})
 		}
 	case "response.reasoning_text.delta", "response.reasoning.delta":
@@ -110,7 +117,7 @@ func (d *SSEDecoder) consume(line string) {
 	case "response.output_item.done":
 		d.onItemDone(w.Item)
 	case "response.completed", "response.incomplete":
-		d.finish(w.Response)
+		d.finish(w.Type, w.Response)
 	case "error":
 		d.fail(w.Error)
 	case "response.failed":
@@ -139,6 +146,12 @@ func (d *SSEDecoder) onItemAdded(raw json.RawMessage) {
 
 func (d *SSEDecoder) onItemDone(raw json.RawMessage) {
 	item := parseCall(raw)
+	if item.Type == "reasoning" {
+		if r := ParseReasoningEnvelope(item.EncryptedContent); r != nil && (r.Signature != "" || r.Redacted != "") {
+			d.push(&Event{Kind: EvReasoningSignature, Signature: r.Signature, Redacted: r.Redacted})
+		}
+		return
+	}
 	if item.Type != "function_call" {
 		return
 	}
@@ -158,30 +171,64 @@ func (d *SSEDecoder) onItemDone(raw json.RawMessage) {
 	d.held = append(d.held, id)
 }
 
-func (d *SSEDecoder) finish(raw json.RawMessage) {
-	for _, id := range d.held {
-		c := d.open[id]
-		if !c.stopped {
-			c.stopped = true
-			d.open[id] = c
-			d.push(&Event{Kind: EvToolUse, ToolUseID: id, ToolStop: true})
-		}
-	}
-	d.held = nil
-	for id, c := range d.open {
-		if !c.stopped {
-			c.stopped = true
-			d.open[id] = c
-			d.push(&Event{Kind: EvToolUse, ToolUseID: id, ToolStop: true})
-		}
-	}
+// incompleteStop incomplete_details.reason → 结束原因，与 IDE 的映射相同。
+var incompleteStop = map[string]string{
+	"max_output_tokens":                     "MAX_TOKENS",
+	"content_filter":                        "CONTENT_FILTERED",
+	"compaction_required_for_model_handoff": "COMPACTION_REQUIRED_FOR_MODEL_HANDOFF",
+}
+
+func (d *SSEDecoder) finish(typ string, raw json.RawMessage) {
 	var resp struct {
+		Status            string `json:"status"`
+		IncompleteDetails *struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
 		Usage struct {
-			Pct float64 `json:"kiro:context_usage_percentage"`
+			Pct     float64 `json:"kiro:context_usage_percentage"`
+			Credits *struct {
+				Value float64 `json:"value"`
+			} `json:"kiro:credits"`
 		} `json:"usage"`
 	}
-	if json.Unmarshal(raw, &resp) == nil && resp.Usage.Pct != 0 {
+	_ = json.Unmarshal(raw, &resp)
+	incomplete := typ == "response.incomplete" || resp.Status == "incomplete"
+	if !incomplete {
+		for _, id := range d.held {
+			d.stopTool(id)
+		}
+		for id := range d.open {
+			d.stopTool(id)
+		}
+	}
+	// 截断时 IDE 不给未完成的工具调用补 stop，这些调用作废。
+	d.held = nil
+	d.open = map[string]toolCall{}
+	d.current = ""
+	if incomplete {
+		reason := ""
+		if resp.IncompleteDetails != nil {
+			reason = resp.IncompleteDetails.Reason
+		}
+		stop := incompleteStop[reason]
+		if stop == "" {
+			stop = "END_TURN"
+		}
+		d.push(&Event{Kind: EvStop, StopReason: stop})
+	}
+	if resp.Usage.Pct != 0 {
 		d.push(&Event{Kind: EvContextUsage, ContextUsage: resp.Usage.Pct})
+	}
+	if resp.Usage.Credits != nil {
+		d.push(&Event{Kind: EvMetering, Credits: resp.Usage.Credits.Value})
+	}
+}
+
+func (d *SSEDecoder) stopTool(id string) {
+	if c, ok := d.open[id]; ok && !c.stopped {
+		c.stopped = true
+		d.open[id] = c
+		d.push(&Event{Kind: EvToolUse, ToolUseID: id, ToolStop: true})
 	}
 }
 
@@ -192,14 +239,10 @@ func (d *SSEDecoder) fail(raw json.RawMessage) {
 		Message string `json:"message"`
 	}
 	_ = json.Unmarshal(raw, &e)
-	code := e.Code
-	if code == "" {
-		code = e.Type
-	}
-	if code == "" {
-		code = "error"
-	}
-	d.push(&Event{Kind: EvError, Code: code, Message: e.Message})
+	d.held = nil
+	d.open = map[string]toolCall{}
+	d.current = ""
+	d.push(&Event{Kind: EvError, Code: e.Code, ErrorType: e.Type, Message: e.Message})
 }
 
 func (d *SSEDecoder) push(ev *Event) { d.pending = append(d.pending, ev) }
@@ -211,6 +254,8 @@ type callItem struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
 	Status    string          `json:"status"`
+	// EncryptedContent reasoning item 的签名信封。
+	EncryptedContent string `json:"encrypted_content"`
 }
 
 func (c callItem) id() string {

@@ -75,6 +75,64 @@ func TestAccountReportRepricesAndKeepsRemoved(t *testing.T) {
 	}
 }
 
+func TestCreditsRecorded(t *testing.T) {
+	l := Open("")
+	l.Record(NewRequest{CredentialID: 1, Model: "claude-opus-5.5", Status: 200, Credits: f(0.25)})
+	// 失败请求上游照样扣了 credits，照记。
+	l.Record(NewRequest{CredentialID: 1, Model: "claude-opus-5.5", Status: 502, Credits: f(0.5)})
+	l.Record(NewRequest{CredentialID: 2, Model: "claude-sonnet-5", Status: 200})
+	l.Record(NewRequest{CredentialID: 2, Model: "claude-sonnet-5", Status: 200, Credits: f(-1)})
+	list := l.List(10)
+	if list[0].Credits != nil || list[1].Credits != nil || list[2].Credits == nil || *list[2].Credits != 0.5 {
+		t.Fatalf("%+v", list)
+	}
+	if d := l.Get(list[3].ID); d == nil || d.Credits == nil || *d.Credits != 0.25 {
+		t.Fatalf("%+v", d)
+	}
+	s := l.Summary()
+	if s.Credits != 0.75 || s.ByModel[0].Credits+s.ByModel[1].Credits != 0.75 {
+		t.Fatalf("%+v", s)
+	}
+	r := l.AccountReport([]Label{{1, "a"}, {2, "b"}})
+	if r.Credits != 0.75 || r.Accounts[0].Credits != 0.75 || r.Accounts[1].Credits != 0 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestCreditsMigratesOldSchema(t *testing.T) {
+	path := t.TempDir() + "/usage.sqlite"
+	db, err := openDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE requests (id INTEGER PRIMARY KEY, time TEXT NOT NULL, model TEXT NOT NULL, stream INTEGER NOT NULL, status INTEGER NOT NULL, duration_ms INTEGER NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, error TEXT)`,
+		`CREATE TABLE model_totals (model TEXT PRIMARY KEY, requests INTEGER NOT NULL, errors INTEGER NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL)`,
+		`CREATE TABLE account_totals (credential_id INTEGER NOT NULL, model TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0, errors INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_5m_tokens INTEGER NOT NULL DEFAULT 0, cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (credential_id, model))`,
+		`INSERT INTO requests(time, model, stream, status, duration_ms, input_tokens, output_tokens) VALUES ('t', 'm', 0, 200, 1, 1, 1)`,
+		`INSERT INTO model_totals VALUES ('m', 1, 0, 1, 1)`,
+		`INSERT INTO account_totals(credential_id, model, requests) VALUES (1, 'm', 1)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	l := Open(path)
+	defer l.db.Close()
+	l.Record(NewRequest{CredentialID: 1, Model: "m", Status: 200, Credits: f(0.5)})
+	list := l.List(10)
+	if len(list) != 2 || list[1].Credits != nil || list[0].Credits == nil {
+		t.Fatalf("%+v", list)
+	}
+	if s := l.Summary(); s.Requests != 2 || s.Credits != 0.5 {
+		t.Fatalf("%+v", s)
+	}
+	if r := l.AccountReport([]Label{{1, "a"}}); r.Accounts[0].Requests != 2 || r.Accounts[0].Credits != 0.5 {
+		t.Fatalf("%+v", r)
+	}
+}
+
 func TestBackfillAndPrune(t *testing.T) {
 	l := openWithRetain("", 3)
 	l.UpsertPrice(ModelPrice{Name: "S", Aliases: []string{"m"}, InputPerM: 1})
@@ -109,5 +167,14 @@ func TestClipAndProfile(t *testing.T) {
 	}
 	if PayloadProfile("nope") != "bytes=4 json=invalid" {
 		t.Fatal("invalid")
+	}
+}
+
+func TestPayloadProfileResponses(t *testing.T) {
+	body := `{"model":"m","input":[{"role":"user","content":"` + strings.Repeat("y", 2500) + `"},{"type":"function_call","call_id":"t","name":"Read","arguments":"{}"},{"type":"function_call_output","call_id":"t","output":"ok"},{"role":"user","content":[{"type":"input_text","text":"hi"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA="}]}],"tools":[{"type":"function","name":"Read"}]}`
+	p := PayloadProfile(body)
+	if !strings.Contains(p, "input=4 messages=2 images=1") || !strings.Contains(p, "tools=1 function_calls=1 function_outputs=1") ||
+		!strings.Contains(p, "i0 user content=2500") || strings.Contains(p, "yyyy") {
+		t.Fatal(p)
 	}
 }

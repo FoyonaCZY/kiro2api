@@ -1,8 +1,10 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,21 +13,29 @@ import (
 
 	"github.com/FoyonaCZY/kiro2api/internal/access"
 	"github.com/FoyonaCZY/kiro2api/internal/config"
+	"github.com/FoyonaCZY/kiro2api/internal/httpx"
 	"github.com/FoyonaCZY/kiro2api/internal/kiro"
 	"github.com/FoyonaCZY/kiro2api/internal/usage"
 )
 
-// localEndpoint 把 krs 指到本地假上游。
-type localEndpoint struct {
-	kiro.KRS
-	url string
+// useFakeUpstream 让 IDE 客户端的连接都落到本地明文假上游，请求原样（含真实 Host）送达。
+func useFakeUpstream(t *testing.T, srv *httptest.Server) {
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	restore := httpx.UseIDEDialer(func(ctx context.Context, _ *httpx.Proxy, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	})
+	t.Cleanup(restore)
 }
-
-func (e localEndpoint) APIURL(*kiro.RequestContext) string { return e.url }
 
 func fakeKiro(t *testing.T, gotBody *[]byte) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer tok" || r.Host != "runtime.eu-central-1.kiro.dev" {
+		if r.Header.Get("x-amz-target") == "KiroControlPlaneBearerService.ListAvailableModels" {
+			_, _ = io.WriteString(w, `{"models":[{"modelId":"claude-opus-5.5"}]}`)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer tok" || r.Host != "runtime.us-east-1.kiro.dev" || r.URL.Path != "/v1/responses" ||
+			r.Header.Get("User-Agent") == "" || r.Header.Get("x-kiro-attempt") != "1;max=3" {
 			w.WriteHeader(403)
 			return
 		}
@@ -37,7 +47,7 @@ func fakeKiro(t *testing.T, gotBody *[]byte) *httptest.Server {
 			"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"p\\\":\"}\n\n"+
 			"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"1}\"}\n\n"+
 			"data: {\"type\":\"response.function_call_arguments.done\"}\n\n"+
-			"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"kiro:context_usage_percentage\":0.5}}}\n\n")
+			"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"kiro:credits\":{\"value\":0.25,\"unit\":\"credit\",\"unit_plural\":\"credits\"},\"kiro:context_usage_percentage\":0.5}}}\n\n")
 	}))
 }
 
@@ -49,7 +59,6 @@ func newTestServer(t *testing.T, upstream string) (*httptest.Server, *usage.Log)
 		t.Fatal(err)
 	}
 	eps := kiro.Endpoints()
-	eps["krs"] = localEndpoint{url: upstream}
 	ul := usage.Open("")
 	acc := access.Open("")
 	acc.ImportInitialKey("sk-test")
@@ -76,6 +85,7 @@ func TestEndToEndMessages(t *testing.T) {
 	var got []byte
 	up := fakeKiro(t, &got)
 	defer up.Close()
+	useFakeUpstream(t, up)
 	srv, ul := newTestServer(t, up.URL)
 	defer srv.Close()
 
@@ -125,11 +135,12 @@ func TestEndToEndMessages(t *testing.T) {
 	}
 
 	sum := ul.Summary()
-	if sum.Requests != 3 || sum.Errors != 0 {
+	// 非流式、流式、/cc 各 0.25 credits。
+	if sum.Requests != 3 || sum.Errors != 0 || sum.Credits != 0.75 {
 		t.Fatalf("%+v", sum)
 	}
 	list := ul.List(5)
-	if list[0].Account != "a@x" || list[0].Endpoint != "krs" {
+	if list[0].Account != "a@x" || list[0].Endpoint != "krs" || list[0].Credits == nil || *list[0].Credits != 0.25 {
 		t.Fatalf("%+v", list[0])
 	}
 	d := ul.Get(list[0].ID)

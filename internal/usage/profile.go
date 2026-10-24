@@ -29,6 +29,9 @@ func PayloadProfile(body string) string {
 		return fmt.Sprintf("bytes=%d json=invalid", len(body))
 	}
 	root, _ := v.(map[string]any)
+	if input, ok := root["input"].([]any); ok {
+		return responsesProfile(body, v, root, input)
+	}
 	state := root
 	if s, ok := root["conversationState"].(map[string]any); ok {
 		state = s
@@ -61,6 +64,88 @@ func PayloadProfile(body string) string {
 	sort.SliceStable(kept, func(i, j int) bool { return kept[i].index < kept[j].index })
 	lines := []string{fmt.Sprintf("bytes=%d history=%d images=%d image_bytes=%d tools=%d tool_uses=%d tool_results=%d",
 		len(body), len(history), images, imageBytes, tools, toolUses, toolResults)}
+	for _, h := range hits {
+		lines = append(lines, fmt.Sprintf("largest %s %d%s", h.path, h.n, h.note))
+	}
+	for _, n := range kept {
+		lines = append(lines, n.line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// responsesProfile /v1/responses 的 body：input 是 OpenAI Responses 风格的条目列表。
+func responsesProfile(body string, v any, root map[string]any, input []any) string {
+	tools, _ := root["tools"].([]any)
+	var images, imageBytes, calls, outputs, reasoning, msgs int
+	var notable []note
+	for i, it := range input {
+		m, _ := it.(map[string]any)
+		label := fmt.Sprintf("i%d", i)
+		switch m["type"] {
+		case "function_call":
+			calls++
+			n := strLen(m, "arguments")
+			notable = append(notable, note{i, n, fmt.Sprintf("%s function_call %v args=%d", label, m["name"], n)})
+		case "function_call_output":
+			outputs++
+			n := strLen(m, "output")
+			notable = append(notable, note{i, n, fmt.Sprintf("%s function_call_output %d", label, n)})
+		case "reasoning":
+			reasoning++
+			n := strLen(m, "encrypted_content")
+			notable = append(notable, note{i, n, fmt.Sprintf("%s reasoning %d", label, n)})
+		default:
+			msgs++
+			role, _ := m["role"].(string)
+			text, count, bytes := 0, 0, 0
+			var dims []string
+			switch c := m["content"].(type) {
+			case string:
+				text = len(c)
+			case []any:
+				for _, p := range c {
+					pm, _ := p.(map[string]any)
+					if pm["type"] == "input_image" {
+						url, _ := pm["image_url"].(string)
+						data := url[strings.IndexByte(url, ',')+1:]
+						count++
+						bytes += len(data)
+						if kind, w, h, ok := imageMeta(data); ok {
+							dims = append(dims, fmt.Sprintf("%s %dx%d", kind, w, h))
+						}
+					} else {
+						text += strLen(pm, "text")
+					}
+				}
+			}
+			images += count
+			imageBytes += bytes
+			d := ""
+			if len(dims) > 0 {
+				d = " " + strings.Join(dims, ",")
+			}
+			notable = append(notable, note{i, text + bytes, fmt.Sprintf("%s %s content=%d images=%d/%d%s", label, role, text, count, bytes, d)})
+		}
+	}
+	var hits []hit
+	collectLarge(v, "", &hits)
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].n > hits[j].n })
+	if len(hits) > 8 {
+		hits = hits[:8]
+	}
+	kept := notable[:0]
+	for _, n := range notable {
+		if n.score >= 2000 {
+			kept = append(kept, n)
+		}
+	}
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].score > kept[j].score })
+	if len(kept) > 24 {
+		kept = kept[:24]
+	}
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].index < kept[j].index })
+	lines := []string{fmt.Sprintf("bytes=%d input=%d messages=%d images=%d image_bytes=%d tools=%d function_calls=%d function_outputs=%d reasoning=%d",
+		len(body), len(input), msgs, images, imageBytes, len(tools), calls, outputs, reasoning)}
 	for _, h := range hits {
 		lines = append(lines, fmt.Sprintf("largest %s %d%s", h.path, h.n, h.note))
 	}
@@ -166,8 +251,12 @@ func collectLarge(v any, path string, hits *[]hit) {
 	case string:
 		if len(t) >= 256 {
 			n := ""
-			if strings.HasSuffix(path, "bytes") {
-				if kind, w, h, ok := imageMeta(t); ok {
+			data := t
+			if strings.HasSuffix(path, "image_url") {
+				data = t[strings.IndexByte(t, ',')+1:]
+			}
+			if strings.HasSuffix(path, "bytes") || strings.HasSuffix(path, "image_url") {
+				if kind, w, h, ok := imageMeta(data); ok {
 					n = fmt.Sprintf(" %s %dx%d", kind, w, h)
 				}
 			}

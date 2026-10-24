@@ -32,6 +32,8 @@ export interface UsageRequest {
   cacheReadTokens?: number
   cacheWrite5mTokens?: number
   cacheWrite1hTokens?: number
+  /** 上游 usage 报的 kiro:credits；null 表示上游没报（老记录或请求没到上游） */
+  credits?: number | null
 }
 
 export interface UsageRequestDetail extends UsageRequest {
@@ -53,6 +55,7 @@ export interface ModelUsage {
   cacheWrite5mTokens: number
   cacheWrite1hTokens: number
   costUsd: number
+  credits: number
 }
 
 export interface UsageSummary {
@@ -64,6 +67,8 @@ export interface UsageSummary {
   cacheWrite5mTokens: number
   cacheWrite1hTokens: number
   costUsd: number
+  /** 上游实际扣的 credits 合计，失败请求扣了也算 */
+  credits: number
   unpricedRequests: number
   byModel: ModelUsage[]
 }
@@ -130,6 +135,8 @@ export interface AccountCost {
   cacheReadTokens: number
   cacheWrite5mTokens: number
   cacheWrite1hTokens: number
+  /** 上游实际扣的 credits 累计 */
+  credits: number
 }
 
 export interface AccountCostReport {
@@ -139,6 +146,7 @@ export interface AccountCostReport {
   costedUsageUsd: number
   usageUsd: number
   costRatio: number | null
+  credits: number
 }
 
 export async function getAccountCosts(): Promise<AccountCostReport> {
@@ -149,6 +157,12 @@ export async function getAccountCosts(): Promise<AccountCostReport> {
 export async function setAccountCost(id: number, costCny: number | null): Promise<AccountCostReport> {
   const { data } = await api.put<AccountCostReport>(`/usage/accounts/${id}/cost`, { costCny })
   return data
+}
+
+/** credits 最多四位小数，null 表示上游没报 */
+export function formatCredits(value?: number | null): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  return value.toLocaleString(undefined, { maximumFractionDigits: 4 })
 }
 
 export function formatCNY(value?: number | null): string {

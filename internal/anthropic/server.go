@@ -215,6 +215,7 @@ type call struct {
 	forward  *kiro.ClaudeForward
 	profile  *CacheProfile
 	log      logCtx
+	credits  *float64
 }
 
 func (c *call) record(status int, in, out int, errText, stop string, t *kiro.Target, response string, cache *CacheSplit) {
@@ -227,10 +228,14 @@ func (c *call) record(status int, in, out int, errText, stop string, t *kiro.Tar
 		InputTokens: int64(split.InputTokens), OutputTokens: int64(out), CacheReadTokens: int64(split.CacheRead),
 		CacheWrite5mTokens: int64(split.CacheWrite5m), CacheWrite1hTokens: int64(split.CacheWrite1h),
 		Error: errText, RequestBytes: uint64(len(c.log.outboundBody)), StopReason: stop,
-		InboundHeaders: c.log.inboundHeaders, InboundBody: c.log.inboundBody, OutboundBody: c.log.outboundBody, ResponseBody: response,
+		InboundHeaders: c.log.inboundHeaders, InboundBody: c.log.inboundBody, OutboundBody: c.log.outboundBody, ResponseBody: response, Credits: c.credits,
 	}
 	if t != nil {
 		r.CredentialID, r.Account, r.Endpoint, r.OutboundHeaders = t.CredentialID, t.Account, t.Endpoint, t.OutboundHeaders
+		if t.OutboundBody != "" {
+			// 记实际发给上游的 /v1/responses body。
+			r.OutboundBody, r.RequestBytes = t.OutboundBody, uint64(len(t.OutboundBody))
+		}
 	}
 	c.s.Usage.Record(r)
 }
@@ -245,7 +250,7 @@ func firstRunes(s string, n int) string {
 func (c *call) recordError(err error) {
 	msg := firstRunes(err.Error(), 180)
 	status := http.StatusBadGateway
-	if strings.Contains(msg, "CONTENT_LENGTH_EXCEEDS_THRESHOLD") || strings.Contains(msg, "Input is too long") {
+	if isInputTooLong(msg) {
 		status = http.StatusBadRequest
 	}
 	var ue *kiro.UpstreamError
@@ -266,7 +271,7 @@ func MapProviderError(w http.ResponseWriter, err error) {
 	}
 	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "CONTENT_LENGTH_EXCEEDS_THRESHOLD"):
+	case strings.Contains(msg, "CONTENT_LENGTH_EXCEEDS_THRESHOLD") || strings.Contains(msg, "context_length_exceeded") || strings.Contains(msg, "请求失败: 413"):
 		slog.Warn("上游拒绝请求：上下文窗口已满（不应重试）", "err", msg)
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "Context window is full. Reduce conversation history, system prompt, or tools.")
 	case strings.Contains(msg, "Input is too long"):
@@ -276,6 +281,11 @@ func MapProviderError(w http.ResponseWriter, err error) {
 		slog.Error("Kiro API 调用失败", "err", msg)
 		writeError(w, http.StatusBadGateway, "api_error", "上游 API 调用失败: "+msg)
 	}
+}
+
+func isInputTooLong(msg string) bool {
+	return strings.Contains(msg, "CONTENT_LENGTH_EXCEEDS_THRESHOLD") || strings.Contains(msg, "Input is too long") ||
+		strings.Contains(msg, "context_length_exceeded") || strings.Contains(msg, "请求失败: 413")
 }
 
 func sseHeaders(w http.ResponseWriter) {
@@ -486,9 +496,12 @@ func (s *Server) streamResp(w http.ResponseWriter, r *http.Request, c *call, buf
 		switch {
 		case rep.ClientGone:
 			status = 499
+		case rep.Status != 0:
+			status = rep.Status
 		case rep.Error != "":
 			status = http.StatusBadGateway
 		}
+		c.credits = rep.Credits
 		c.record(status, rep.InputTokens, rep.OutputTokens, rep.Error, rep.StopReason, &target, rep.ResponseBody, cache)
 	}
 	var sc *StreamContext
@@ -559,6 +572,15 @@ func (s *Server) streamResp(w http.ResponseWriter, r *http.Request, c *call, buf
 			if len(evs) > 0 {
 				writeEvents(w, evs)
 			}
+			// 上游在流里报错：IDE 会直接按错误结束这次调用，这里发 Anthropic error 事件。
+			if e := sc.UpstreamError(); e != nil {
+				if buffered {
+					writeEvents(w, bc.FailWith(e, "上游流中途报错: "+e.Message))
+				} else {
+					writeEvents(w, sc.FailWith(e, "上游流中途报错: "+e.Message))
+				}
+				return
+			}
 		}
 	}
 }
@@ -590,6 +612,8 @@ func (s *Server) nonStream(w http.ResponseWriter, r *http.Request, c *call) {
 	}
 	var text, reasoning strings.Builder
 	var toolUses []map[string]any
+	var signature, redacted string
+	var upErr *StreamError
 	hasTool := false
 	stop := "end_turn"
 	ctxInput, hasCtxInput := 0, false
@@ -629,12 +653,31 @@ func (s *Server) nonStream(w http.ResponseWriter, r *http.Request, c *call) {
 			if ev.ContextUsage >= 100 {
 				stop = "model_context_window_exceeded"
 			}
-		case kiro.EvException:
-			if ev.Code == "ContentLengthExceededException" {
-				stop = "max_tokens"
+		case kiro.EvStop:
+			if r := stopReasonFor(ev.StopReason); r != "" {
+				stop = r
+			}
+		case kiro.EvMetering:
+			v := ev.Credits
+			c.credits = &v
+		case kiro.EvReasoningSignature:
+			if ev.Redacted != "" {
+				redacted = ev.Redacted
+			} else {
+				signature = ev.Signature
+			}
+		case kiro.EvError:
+			if upErr == nil {
+				upErr = MapStreamError(ev.Code, ev.ErrorType, ev.Message)
 			}
 		}
 	})
+	if upErr != nil {
+		slog.Error("上游流中途报错", "status", upErr.Status, "type", upErr.Type, "message", upErr.Message)
+		c.record(upErr.Status, c.input, 0, "上游流中途报错: "+upErr.Message, "", &up.Target, "", cache)
+		writeError(w, upErr.Status, upErr.Type, upErr.Message)
+		return
+	}
 	if hasTool && stop == "end_turn" {
 		stop = "tool_use"
 	}
@@ -645,7 +688,14 @@ func (s *Server) nonStream(w http.ResponseWriter, r *http.Request, c *call) {
 			th, ok, rest = ExtractThinking(text.String())
 		}
 		if ok {
-			content = append(content, map[string]any{"type": "thinking", "thinking": th})
+			block := map[string]any{"type": "thinking", "thinking": th}
+			if signature != "" {
+				block["signature"] = signature
+			}
+			content = append(content, block)
+		}
+		if redacted != "" {
+			content = append(content, map[string]any{"type": "redacted_thinking", "data": redacted})
 		}
 		if rest != "" {
 			content = append(content, map[string]any{"type": "text", "text": rest})

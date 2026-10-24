@@ -67,6 +67,8 @@ type RequestRecord struct {
 	CacheReadTokens    int64   `json:"cacheReadTokens"`
 	CacheWrite5mTokens int64   `json:"cacheWrite5mTokens"`
 	CacheWrite1hTokens int64   `json:"cacheWrite1hTokens"`
+	// Credits 上游 usage 里报的 kiro:credits；nil 表示上游没报（老记录、请求没到上游）。
+	Credits *float64 `json:"credits"`
 }
 
 // tokens 失败请求（含断流）不计费。
@@ -105,6 +107,7 @@ type ModelUsage struct {
 	CacheWrite5mTokens int64   `json:"cacheWrite5mTokens"`
 	CacheWrite1hTokens int64   `json:"cacheWrite1hTokens"`
 	CostUSD            float64 `json:"costUsd"`
+	Credits            float64 `json:"credits"`
 }
 
 // Summary 总汇总。
@@ -117,6 +120,7 @@ type Summary struct {
 	CacheWrite5mTokens int64        `json:"cacheWrite5mTokens"`
 	CacheWrite1hTokens int64        `json:"cacheWrite1hTokens"`
 	CostUSD            float64      `json:"costUsd"`
+	Credits            float64      `json:"credits"`
 	UnpricedRequests   uint64       `json:"unpricedRequests"`
 	ByModel            []ModelUsage `json:"byModel"`
 }
@@ -137,6 +141,7 @@ type AccountCost struct {
 	CacheReadTokens    int64    `json:"cacheReadTokens"`
 	CacheWrite5mTokens int64    `json:"cacheWrite5mTokens"`
 	CacheWrite1hTokens int64    `json:"cacheWrite1hTokens"`
+	Credits            float64  `json:"credits"`
 }
 
 // AccountCostReport 账号成本报表。
@@ -147,6 +152,7 @@ type AccountCostReport struct {
 	CostedUsageUSD float64       `json:"costedUsageUsd"`
 	UsageUSD       float64       `json:"usageUsd"`
 	CostRatio      *float64      `json:"costRatio"`
+	Credits        float64       `json:"credits"`
 }
 
 func costRatio(cny, usd float64) *float64 {
@@ -174,11 +180,13 @@ type NewRequest struct {
 	CacheReadTokens    int64
 	CacheWrite5mTokens int64
 	CacheWrite1hTokens int64
-	InboundHeaders     string
-	InboundBody        string
-	OutboundHeaders    string
-	OutboundBody       string
-	ResponseBody       string
+	// Credits 上游实际扣的 credits，nil 表示没报。失败请求也照记，扣了就是扣了。
+	Credits         *float64
+	InboundHeaders  string
+	InboundBody     string
+	OutboundHeaders string
+	OutboundBody    string
+	ResponseBody    string
 }
 
 // Log usage.sqlite。
@@ -277,9 +285,13 @@ func (l *Log) Record(r NewRequest) {
 	if lengthErr {
 		outLimit = lengthErrorBlob
 	}
-	var cred any
+	var cred, credits any
 	if r.CredentialID != 0 {
 		cred = int64(r.CredentialID)
+	}
+	spent := 0.0
+	if c := r.Credits; c != nil && *c >= 0 && !math.IsInf(*c, 0) && !math.IsNaN(*c) {
+		credits, spent = *c, *c
 	}
 	tx, err := l.db.Begin()
 	if err != nil {
@@ -287,12 +299,12 @@ func (l *Log) Record(r NewRequest) {
 		return
 	}
 	defer tx.Rollback() //nolint:errcheck
-	if _, err := tx.Exec(`INSERT INTO requests(time, model, stream, status, duration_ms, input_tokens, output_tokens, error, account, endpoint, request_bytes, stop_reason, inbound_headers, inbound_body, outbound_headers, outbound_body, response_body, payload_profile, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, credential_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	if _, err := tx.Exec(`INSERT INTO requests(time, model, stream, status, duration_ms, input_tokens, output_tokens, error, account, endpoint, request_bytes, stop_reason, inbound_headers, inbound_body, outbound_headers, outbound_body, response_body, payload_profile, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, credential_id, credits)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nowRFC3339(), model, boolInt(r.Stream), r.Status, int64(r.DurationMs), in, out, errText,
 		Clip(r.Account, 200), Clip(r.Endpoint, 80), int64(r.RequestBytes), Clip(r.StopReason, 80),
 		Clip(r.InboundHeaders, maxBlob), Clip(r.InboundBody, maxBlob), Clip(r.OutboundHeaders, maxBlob),
-		Clip(r.OutboundBody, outLimit), Clip(r.ResponseBody, maxBlob), Clip(profile, 16*1024), cr, c5, c1, cred); err != nil {
+		Clip(r.OutboundBody, outLimit), Clip(r.ResponseBody, maxBlob), Clip(profile, 16*1024), cr, c5, c1, cred, credits); err != nil {
 		slog.Warn("记录请求失败", "err", err)
 		return
 	}
@@ -302,19 +314,20 @@ func (l *Log) Record(r NewRequest) {
 		}
 		return 0
 	}
-	if _, err := tx.Exec(`INSERT INTO model_totals(model, requests, errors, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens)
-		VALUES (?, 1, ?, ?, ?, ?, ?, ?)
+	if _, err := tx.Exec(`INSERT INTO model_totals(model, requests, errors, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, credits)
+		VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(model) DO UPDATE SET requests = requests + 1, errors = errors + excluded.errors,
 		  input_tokens = input_tokens + excluded.input_tokens, output_tokens = output_tokens + excluded.output_tokens,
 		  cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
 		  cache_write_5m_tokens = cache_write_5m_tokens + excluded.cache_write_5m_tokens,
-		  cache_write_1h_tokens = cache_write_1h_tokens + excluded.cache_write_1h_tokens`,
-		key, errs, bill(in), bill(out), bill(cr), bill(c5), bill(c1)); err != nil {
+		  cache_write_1h_tokens = cache_write_1h_tokens + excluded.cache_write_1h_tokens,
+		  credits = credits + excluded.credits`,
+		key, errs, bill(in), bill(out), bill(cr), bill(c5), bill(c1), spent); err != nil {
 		slog.Warn("累计用量失败", "err", err)
 		return
 	}
 	if r.CredentialID != 0 {
-		if err := addAccountTotals(tx, r.CredentialID, key, 1, errs, Tokens{bill(in), bill(out), bill(cr), bill(c5), bill(c1)}); err != nil {
+		if err := addAccountTotals(tx, r.CredentialID, key, 1, errs, Tokens{bill(in), bill(out), bill(cr), bill(c5), bill(c1)}, spent); err != nil {
 			slog.Warn("累计账号用量失败", "err", err)
 			return
 		}
@@ -342,19 +355,20 @@ type execer interface {
 	Exec(string, ...any) (sql.Result, error)
 }
 
-func addAccountTotals(db execer, cred uint64, model string, requests, errs int64, t Tokens) error {
-	_, err := db.Exec(`INSERT INTO account_totals(credential_id, model, requests, errors, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+func addAccountTotals(db execer, cred uint64, model string, requests, errs int64, t Tokens, credits float64) error {
+	_, err := db.Exec(`INSERT INTO account_totals(credential_id, model, requests, errors, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, credits)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(credential_id, model) DO UPDATE SET requests = requests + excluded.requests, errors = errors + excluded.errors,
 		  input_tokens = input_tokens + excluded.input_tokens, output_tokens = output_tokens + excluded.output_tokens,
 		  cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
 		  cache_write_5m_tokens = cache_write_5m_tokens + excluded.cache_write_5m_tokens,
-		  cache_write_1h_tokens = cache_write_1h_tokens + excluded.cache_write_1h_tokens`,
-		int64(cred), model, requests, errs, nz(t.Input), nz(t.Output), nz(t.CacheRead), nz(t.CacheWrite5m), nz(t.CacheWrite1h))
+		  cache_write_1h_tokens = cache_write_1h_tokens + excluded.cache_write_1h_tokens,
+		  credits = credits + excluded.credits`,
+		int64(cred), model, requests, errs, nz(t.Input), nz(t.Output), nz(t.CacheRead), nz(t.CacheWrite5m), nz(t.CacheWrite1h), credits)
 	return err
 }
 
-const recordColumns = "id, time, model, stream, status, duration_ms, input_tokens, output_tokens, error, account, endpoint, request_bytes, stop_reason, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens"
+const recordColumns = "id, time, model, stream, status, duration_ms, input_tokens, output_tokens, error, account, endpoint, request_bytes, stop_reason, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, credits"
 
 type scanner interface{ Scan(...any) error }
 
@@ -363,7 +377,8 @@ func scanRecord(s scanner, extra ...any) (*RequestRecord, error) {
 	var id, stream, status, dur int64
 	var errText, account, endpoint, stop sql.NullString
 	var reqBytes, cr, c5, c1 sql.NullInt64
-	dest := append([]any{&id, &r.Time, &r.Model, &stream, &status, &dur, &r.InputTokens, &r.OutputTokens, &errText, &account, &endpoint, &reqBytes, &stop, &cr, &c5, &c1}, extra...)
+	var credits sql.NullFloat64
+	dest := append([]any{&id, &r.Time, &r.Model, &stream, &status, &dur, &r.InputTokens, &r.OutputTokens, &errText, &account, &endpoint, &reqBytes, &stop, &cr, &c5, &c1, &credits}, extra...)
 	if err := s.Scan(dest...); err != nil {
 		return nil, err
 	}
@@ -374,6 +389,9 @@ func scanRecord(s scanner, extra ...any) (*RequestRecord, error) {
 	r.Account, r.Endpoint, r.StopReason = account.String, endpoint.String, stop.String
 	r.RequestBytes = uint64(max(reqBytes.Int64, 0))
 	r.CacheReadTokens, r.CacheWrite5mTokens, r.CacheWrite1hTokens = cr.Int64, c5.Int64, c1.Int64
+	if credits.Valid {
+		r.Credits = &credits.Float64
+	}
 	return &r, nil
 }
 
@@ -427,7 +445,7 @@ func (l *Log) Summary() Summary {
 	defer l.mu.Unlock()
 	prices, _ := loadPrices(l.db)
 	s := Summary{ByModel: []ModelUsage{}}
-	rows, err := l.db.Query(`SELECT model, requests, errors, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens FROM model_totals`)
+	rows, err := l.db.Query(`SELECT model, requests, errors, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, credits FROM model_totals`)
 	if err != nil {
 		slog.Warn("读取用量汇总失败", "err", err)
 		return s
@@ -437,7 +455,7 @@ func (l *Log) Summary() Summary {
 		var m ModelUsage
 		var req, errs int64
 		var t Tokens
-		if rows.Scan(&m.Model, &req, &errs, &t.Input, &t.Output, &t.CacheRead, &t.CacheWrite5m, &t.CacheWrite1h) != nil {
+		if rows.Scan(&m.Model, &req, &errs, &t.Input, &t.Output, &t.CacheRead, &t.CacheWrite5m, &t.CacheWrite1h, &m.Credits) != nil {
 			continue
 		}
 		m.Requests, m.Errors = uint64(max(req, 0)), uint64(max(errs, 0))
@@ -459,6 +477,7 @@ func (l *Log) Summary() Summary {
 		s.CacheWrite5mTokens += m.CacheWrite5mTokens
 		s.CacheWrite1hTokens += m.CacheWrite1hTokens
 		s.CostUSD += m.CostUSD
+		s.Credits += m.Credits
 	}
 	return s
 }
@@ -594,13 +613,14 @@ func (l *Log) AccountReport(labels []Label) AccountCostReport {
 		model         string
 		requests, err int64
 		t             Tokens
+		credits       float64
 	}
 	totals := map[uint64][]tot{}
-	if rows, err := l.db.Query(`SELECT credential_id, model, requests, errors, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens FROM account_totals`); err == nil {
+	if rows, err := l.db.Query(`SELECT credential_id, model, requests, errors, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, credits FROM account_totals`); err == nil {
 		for rows.Next() {
 			var id int64
 			var x tot
-			if rows.Scan(&id, &x.model, &x.requests, &x.err, &x.t.Input, &x.t.Output, &x.t.CacheRead, &x.t.CacheWrite5m, &x.t.CacheWrite1h) == nil {
+			if rows.Scan(&id, &x.model, &x.requests, &x.err, &x.t.Input, &x.t.Output, &x.t.CacheRead, &x.t.CacheWrite5m, &x.t.CacheWrite1h, &x.credits) == nil {
 				totals[uint64(id)] = append(totals[uint64(id)], x)
 			}
 		}
@@ -651,6 +671,7 @@ func (l *Log) AccountReport(labels []Label) AccountCostReport {
 			row.CacheReadTokens += x.t.CacheRead
 			row.CacheWrite5mTokens += x.t.CacheWrite5m
 			row.CacheWrite1hTokens += x.t.CacheWrite1h
+			row.Credits += x.credits
 			if c := Charge(prices, x.model, x.t); c != nil {
 				row.UsageUSD += *c
 			} else {
@@ -664,6 +685,7 @@ func (l *Log) AccountReport(labels []Label) AccountCostReport {
 			rep.CostedUsageUSD += row.UsageUSD
 		}
 		rep.UsageUSD += row.UsageUSD
+		rep.Credits += row.Credits
 		rep.Accounts = append(rep.Accounts, row)
 	}
 	rep.CostRatio = costRatio(rep.CostCNY, rep.CostedUsageUSD)
@@ -740,7 +762,7 @@ func (l *Log) BackfillAccounts(emailToID map[string]uint64) int {
 	}
 	defer tx.Rollback() //nolint:errcheck
 	for k, a := range grouped {
-		if err := addAccountTotals(tx, k.id, k.model, a.req, a.errs, a.t); err != nil {
+		if err := addAccountTotals(tx, k.id, k.model, a.req, a.errs, a.t, 0); err != nil {
 			slog.Warn("回填账号用量失败", "err", err)
 			return 0
 		}
@@ -875,7 +897,8 @@ func initSchema(db *sql.DB) error {
 	for _, c := range []string{"cache_read_per_m", "cache_write_5m_per_m", "cache_write_1h_per_m"} {
 		cols = append(cols, [3]string{"prices", c, "REAL"})
 	}
-	cols = append(cols, [3]string{"requests", "credential_id", "INTEGER"})
+	cols = append(cols, [3]string{"requests", "credential_id", "INTEGER"}, [3]string{"requests", "credits", "REAL"},
+		[3]string{"model_totals", "credits", "REAL NOT NULL DEFAULT 0"}, [3]string{"account_totals", "credits", "REAL NOT NULL DEFAULT 0"})
 	for _, c := range cols {
 		if err := ensureColumn(db, c[0], c[1], c[2]); err != nil {
 			return err

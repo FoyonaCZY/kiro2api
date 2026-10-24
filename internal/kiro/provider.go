@@ -30,6 +30,7 @@ type Target struct {
 	Account         string
 	Endpoint        string
 	OutboundHeaders string
+	OutboundBody    string
 }
 
 // UpstreamResponse 成功的上游响应。Passthrough 表示上游已是 Anthropic 格式，原样返回。
@@ -70,11 +71,12 @@ type Provider struct {
 	pool            *httpx.Pool
 	endpoints       map[string]Endpoint
 	defaultEndpoint string
+	models          *modelCache
 }
 
 // NewProvider 创建 provider。
 func NewProvider(tm *Manager, endpoints map[string]Endpoint, defaultEndpoint string) *Provider {
-	return &Provider{tm: tm, pool: httpx.NewPool(upstreamTimeout), endpoints: endpoints, defaultEndpoint: defaultEndpoint}
+	return &Provider{tm: tm, pool: httpx.NewPool(upstreamTimeout), endpoints: endpoints, defaultEndpoint: defaultEndpoint, models: newModelCache()}
 }
 
 // Manager 调度器。
@@ -150,6 +152,12 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 
 // ExtractModel conversationState.currentMessage.userInputMessage.modelId。
 func ExtractModel(body []byte) string {
+	m, _ := envelopeInfo(body)
+	return m
+}
+
+// envelopeInfo 模型名和本轮调用位置。
+func envelopeInfo(body []byte) (string, int) {
 	var v struct {
 		ConversationState struct {
 			CurrentMessage struct {
@@ -158,9 +166,10 @@ func ExtractModel(body []byte) string {
 				} `json:"userInputMessage"`
 			} `json:"currentMessage"`
 		} `json:"conversationState"`
+		CallPosition int `json:"callPosition"`
 	}
 	_ = json.Unmarshal(body, &v)
-	return v.ConversationState.CurrentMessage.UserInputMessage.ModelID
+	return v.ConversationState.CurrentMessage.UserInputMessage.ModelID, v.CallPosition
 }
 
 func (p *Provider) forwardClaude(ctx context.Context, cc *CallContext, fw *ClaudeForward, stream bool) (*http.Response, error) {
@@ -218,7 +227,9 @@ func (p *Provider) CallMessages(ctx context.Context, kiroBody []byte, fw *Claude
 	var lastTarget *Target
 	forceRefreshed := map[uint64]bool{}
 	claudeTried := map[uint64]bool{}
-	model := ExtractModel(kiroBody)
+	attempts := map[uint64]int{}
+	model, callPosition := envelopeInfo(kiroBody)
+	budget := AttemptBudget(callPosition)
 	if model == "" && fw != nil {
 		var v struct {
 			Model string `json:"model"`
@@ -289,27 +300,19 @@ func (p *Provider) CallMessages(ctx context.Context, kiroBody []byte, fw *Claude
 			continue
 		}
 		rc := &RequestContext{Cred: cc.Cred, Token: cc.Token, MachineID: mid, Config: cfg}
-		body, err := ResponsesFromKiro(ep.TransformAPIBody(string(kiroBody), rc), cfg.AgentMode)
+		px := cc.Cred.EffectiveProxy(p.tm.GlobalProxy())
+		info := p.models.Lookup(ctx, cc.ID, rc, px, model)
+		body, err := ResponsesFromKiro(InjectProfileArn(string(kiroBody), cc.Cred.ProfileArn), cfg.AgentMode, info)
 		if err != nil {
 			return nil, err
 		}
+		attempts[cc.ID]++
+		req := ResponsesRequest(rc, []byte(body), attempts[cc.ID], budget)
 		target := Target{CredentialID: cc.ID, Account: accountName(cc.Cred, cc.ID), Endpoint: ep.Name(),
-			OutboundHeaders: redact.EncodeHeaders(ep.APILogHeaders(&RequestContext{Cred: cc.Cred, MachineID: mid, Config: cfg}))}
+			OutboundHeaders: redact.EncodeHeaders(RedactedHeaders(req)), OutboundBody: body}
 		lastTarget = &target
 
-		cl, err := p.client(cc.Cred)
-		if err != nil {
-			return nil, err
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep.APIURL(rc), strings.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("content-type", "application/json")
-		req.Close = true
-		ep.DecorateAPI(req, rc)
-
-		resp, err := cl.Do(req)
+		resp, err := httpx.DoIDE(ctx, px, req, upstreamTimeout)
 		if err != nil {
 			// 网络错误多半是链路抖动，不禁用也不换号，免得一阵抖动把所有凭据都禁掉。
 			slog.Warn(fmt.Sprintf("API 请求发送失败（尝试 %d/%d）: %v", attempt+1, maxRetries, err))
@@ -382,6 +385,7 @@ func (p *Provider) CallMCP(ctx context.Context, body []byte) (*http.Response, er
 	var lastErr error
 	forceRefreshed := map[uint64]bool{}
 	skipped := map[uint64]bool{}
+	attempts := map[uint64]int{}
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		cc, err := p.tm.AcquireContext(ctx, "")
 		if err != nil {
@@ -396,25 +400,13 @@ func (p *Provider) CallMCP(ctx context.Context, body []byte) (*http.Response, er
 			continue
 		}
 		cfg := p.tm.Config()
-		ep, err := p.endpointFor(cc.Cred)
-		if err != nil {
-			lastErr = err
-			p.tm.ReportFailure(cc.ID)
-			continue
-		}
 		rc := &RequestContext{Cred: cc.Cred, Token: cc.Token, MachineID: MachineIDFor(cc.Cred, cfg), Config: cfg}
-		cl, err := p.client(cc.Cred)
+		attempts[cc.ID]++
+		req, err := MCPRequest(rc, body, attempts[cc.ID])
 		if err != nil {
 			return nil, err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep.MCPURL(rc), bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("content-type", "application/json")
-		req.Close = true
-		ep.DecorateMCP(req, rc)
-		resp, err := cl.Do(req)
+		resp, err := httpx.DoIDE(ctx, cc.Cred.EffectiveProxy(p.tm.GlobalProxy()), req, upstreamTimeout)
 		if err != nil {
 			slog.Warn(fmt.Sprintf("MCP 请求发送失败（尝试 %d/%d）: %v", attempt+1, maxRetries, err))
 			lastErr = err

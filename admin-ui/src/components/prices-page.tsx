@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { deletePrice, getPrices, getUsageSummary, savePrice, type ModelPrice } from '@/api/usage'
+import { deletePrice, formatCredits, getPrices, getUsageSummary, savePrice, type ModelPrice } from '@/api/usage'
 import { PageHeader } from '@/components/page-header'
 import { AccountCosts } from '@/components/account-costs'
 import { Button } from '@/components/ui/button'
@@ -123,7 +123,7 @@ export function PricesPage() {
         description="单价是每百万 token 的美元价格。开启模拟缓存后，缓存读写按缓存单价计费，留空时按输入价的 0.1x / 1.25x / 2x。费用不落库，每次都按当前单价从 token 重算，所以新增或修改单价（含缓存价）后，历史请求、汇总和账号倍率都会立即按新单价更新。未匹配到别名的请求显示为未定价。"
       />
 
-      <div className="grid gap-4 md:grid-cols-5">
+      <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-6">
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">请求</CardTitle></CardHeader>
           <CardContent className="text-2xl font-medium">{totals?.requests ?? '—'}</CardContent>
@@ -145,6 +145,10 @@ export function PricesPage() {
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">估算费用</CardTitle></CardHeader>
           <CardContent className="text-2xl font-medium">{totals ? money(totals.costUsd) : '—'}</CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground" title="上游 usage 里报的 kiro:credits，失败请求扣了也算">上游 credits</CardTitle></CardHeader>
+          <CardContent className="text-2xl font-medium">{totals ? formatCredits(totals.credits) : '—'}</CardContent>
         </Card>
       </div>
 
@@ -216,6 +220,7 @@ export function PricesPage() {
                 <th className="px-3 py-2 font-medium">缓存读</th>
                 <th className="px-3 py-2 font-medium">缓存写</th>
                 <th className="px-3 py-2 font-medium">费用</th>
+                <th className="px-3 py-2 font-medium">Credits</th>
               </tr>
             </thead>
             <tbody>
@@ -229,6 +234,7 @@ export function PricesPage() {
                   <td className="px-3 py-2">{row.cacheReadTokens}</td>
                   <td className="px-3 py-2">{row.cacheWrite5mTokens + row.cacheWrite1hTokens}</td>
                   <td className="px-3 py-2">{money(row.costUsd)}</td>
+                  <td className="px-3 py-2">{formatCredits(row.credits)}</td>
                 </tr>
               ))}
             </tbody>

@@ -36,7 +36,7 @@ func TestResponsesFromKiro(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := ResponsesFromKiro(string(raw), "vibe")
+	out, err := ResponsesFromKiro(string(raw), "vibe", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

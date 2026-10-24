@@ -162,6 +162,9 @@ type UsageReport struct {
 	ResponseBody string
 	Error        string
 	ClientGone   bool
+	Status       int
+	// Credits 上游 usage 报的 kiro:credits，nil 表示没报。
+	Credits *float64
 }
 
 // StreamContext Kiro 事件 → Anthropic SSE。
@@ -189,6 +192,59 @@ type StreamContext struct {
 	thinkingText      strings.Builder
 	onUsage           func(UsageReport)
 	cache             *CacheSplit
+	signature         string
+	upstreamErr       *StreamError
+	credits           *float64
+}
+
+// StreamError 上游在流中途报的错，已映射成 Anthropic 错误。
+type StreamError struct {
+	Status  int
+	Type    string
+	Message string
+}
+
+// MapStreamError 按 Kiro IDE 的规则把 /v1/responses 的错误 code/type 归类，再换成 Anthropic 错误类型。
+func MapStreamError(code, typ, msg string) *StreamError {
+	t := strings.ToLower(typ)
+	c := strings.ToUpper(strings.TrimPrefix(code, "kiro:"))
+	e := &StreamError{Status: 500, Type: "api_error", Message: msg}
+	switch {
+	case code == "context_length_exceeded":
+		e.Status, e.Type = 400, "invalid_request_error"
+		if e.Message == "" {
+			e.Message = "Input is too long. Reduce the size of your messages."
+		}
+	case code == "model_not_found" || t == "not_found":
+		e.Status, e.Type = 404, "not_found_error"
+	case t == "too_many_requests" || code == "rate_limit_exceeded" || c == "THROTTLING":
+		e.Status, e.Type = 429, "rate_limit_error"
+	case t == "insufficient_quota" || code == "credit_balance_exhausted" || strings.Contains(c, "MONTHLY_REQUEST_COUNT"):
+		e.Status, e.Type = 402, "billing_error"
+	case code == "access_denied" || code == "kiro:model_requires_user_opt_in":
+		e.Status, e.Type = 403, "permission_error"
+	case t == "invalid_request" || strings.HasPrefix(code, "invalid_") || strings.HasPrefix(code, "unsupported_") || strings.HasPrefix(code, "missing_"):
+		e.Status, e.Type = 400, "invalid_request_error"
+	case code == "server_is_overloaded":
+		e.Status, e.Type = 529, "overloaded_error"
+	}
+	if e.Message == "" {
+		e.Message = "Upstream error: " + strings.TrimSpace(code+" "+typ)
+	}
+	return e
+}
+
+// stopReasonFor 上游结束原因 → Anthropic stop_reason。
+func stopReasonFor(r string) string {
+	switch r {
+	case "MAX_TOKENS":
+		return "max_tokens"
+	case "CONTENT_FILTERED":
+		return "refusal"
+	case "COMPACTION_REQUIRED_FOR_MODEL_HANDOFF":
+		return "model_context_window_exceeded"
+	}
+	return ""
 }
 
 // NewStreamContext 创建上下文。
@@ -272,14 +328,41 @@ func (c *StreamContext) Process(ev *kiro.Event) []SSEEvent {
 		if ev.ContextUsage >= 100 {
 			c.st.stopReason = "model_context_window_exceeded"
 		}
-	case kiro.EvError:
-		slog.Error("收到错误事件", "code", ev.Code, "message", ev.Message)
-	case kiro.EvException:
-		if ev.Code == "ContentLengthExceededException" {
-			c.st.stopReason = "max_tokens"
+	case kiro.EvReasoningSignature:
+		return c.reasoningSignature(ev)
+	case kiro.EvStop:
+		if r := stopReasonFor(ev.StopReason); r != "" {
+			c.st.stopReason = r
 		}
-		slog.Warn("收到异常事件", "type", ev.Code, "message", ev.Message)
+	case kiro.EvMetering:
+		v := ev.Credits
+		c.credits = &v
+	case kiro.EvError:
+		slog.Error("上游流中途报错", "code", ev.Code, "type", ev.ErrorType, "message", ev.Message)
+		if c.upstreamErr == nil {
+			c.upstreamErr = MapStreamError(ev.Code, ev.ErrorType, ev.Message)
+		}
 	}
+	return nil
+}
+
+// UpstreamError 流中途收到的上游错误；非空时调用方应发 error 事件并结束。
+func (c *StreamContext) UpstreamError() *StreamError { return c.upstreamErr }
+
+// reasoningSignature 原生思考的签名跟在思考块末尾；redacted 思考单独成块。
+func (c *StreamContext) reasoningSignature(ev *kiro.Event) []SSEEvent {
+	if !c.thinkingEnabled {
+		return nil
+	}
+	if ev.Redacted != "" {
+		out := c.closeReasoning()
+		i := c.st.next()
+		out = append(out, c.st.blockStart(i, "redacted_thinking", map[string]any{
+			"type": "content_block_start", "index": i, "content_block": map[string]any{"type": "redacted_thinking", "data": ev.Redacted},
+		})...)
+		return append(out, c.st.blockStop(i)...)
+	}
+	c.signature = ev.Signature
 	return nil
 }
 
@@ -327,6 +410,13 @@ func (c *StreamContext) closeThinkingBlock() []SSEEvent {
 		return nil
 	}
 	out := []SSEEvent{c.thinkingDelta(c.thinkingIndex, "")}
+	if c.signature != "" {
+		out = append(out, SSEEvent{"content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": c.thinkingIndex,
+			"delta": map[string]any{"type": "signature_delta", "signature": c.signature},
+		}})
+		c.signature = ""
+	}
 	return append(out, c.st.blockStop(c.thinkingIndex)...)
 }
 
@@ -514,27 +604,30 @@ func (c *StreamContext) FinalEvents() []SSEEvent {
 	in, outTok := c.finalInput(), c.outputTokens
 	if f := c.onUsage; f != nil {
 		c.onUsage = nil
-		f(UsageReport{InputTokens: in, OutputTokens: outTok, StopReason: c.st.finalStopReason(), ResponseBody: c.assembled()})
+		f(UsageReport{InputTokens: in, OutputTokens: outTok, StopReason: c.st.finalStopReason(), ResponseBody: c.assembled(), Credits: c.credits})
 	}
 	return append(out, c.st.final(c.usage(in, outTok))...)
 }
 
 // Fail 上游断流：只发 error 事件，不发 message_delta/stop，用量按失败入库。
 func (c *StreamContext) Fail(reason string) []SSEEvent {
+	return c.FailWith(&StreamError{Status: 502, Type: "api_error", Message: "Upstream stream was interrupted before the response finished. Please retry."}, "上游流中断: "+reason)
+}
+
+// FailWith 发出指定的 Anthropic 错误事件。
+func (c *StreamContext) FailWith(e *StreamError, logText string) []SSEEvent {
 	if f := c.onUsage; f != nil {
 		c.onUsage = nil
-		f(UsageReport{InputTokens: c.finalInput(), OutputTokens: c.outputTokens, ResponseBody: c.assembled(), Error: "上游流中断: " + reason})
+		f(UsageReport{InputTokens: c.finalInput(), OutputTokens: c.outputTokens, ResponseBody: c.assembled(), Error: logText, Status: e.Status, Credits: c.credits})
 	}
-	return []SSEEvent{{"error", map[string]any{"type": "error", "error": map[string]any{
-		"type": "api_error", "message": "Upstream stream was interrupted before the response finished. Please retry.",
-	}}}}
+	return []SSEEvent{{"error", map[string]any{"type": "error", "error": map[string]any{"type": e.Type, "message": e.Message}}}}
 }
 
 // Cancel 客户端先断开：按失败入库，不计费，也不再写任何事件。
 func (c *StreamContext) Cancel() {
 	if f := c.onUsage; f != nil {
 		c.onUsage = nil
-		f(UsageReport{InputTokens: c.finalInput(), OutputTokens: c.outputTokens, ResponseBody: c.assembled(), Error: "客户端断开连接", ClientGone: true})
+		f(UsageReport{InputTokens: c.finalInput(), OutputTokens: c.outputTokens, ResponseBody: c.assembled(), Error: "客户端断开连接", ClientGone: true, Credits: c.credits})
 	}
 }
 
@@ -571,6 +664,12 @@ func (b *BufferedStreamContext) Process(ev *kiro.Event) {
 func (b *BufferedStreamContext) Fail(reason string) []SSEEvent {
 	b.buf = nil
 	return b.inner.Fail(reason)
+}
+
+// FailWith 丢掉半截回复，发指定错误。
+func (b *BufferedStreamContext) FailWith(e *StreamError, logText string) []SSEEvent {
+	b.buf = nil
+	return b.inner.FailWith(e, logText)
 }
 
 // Finish 返回全部事件，message_start 的 usage 已更正。

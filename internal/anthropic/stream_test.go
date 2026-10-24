@@ -235,3 +235,47 @@ func TestSSEFormat(t *testing.T) {
 		t.Fatal(s)
 	}
 }
+
+func TestNativeReasoningSignatureAndStops(t *testing.T) {
+	c := NewStreamContext("claude-opus-5-5", 10, true, nil)
+	evs := c.InitialEvents()
+	evs = append(evs, c.Process(reasoningEv("plan"))...)
+	evs = append(evs, c.Process(&kiro.Event{Kind: kiro.EvReasoningSignature, Signature: "SIG"})...)
+	evs = append(evs, c.Process(answer("done"))...)
+	evs = append(evs, c.Process(&kiro.Event{Kind: kiro.EvStop, StopReason: "MAX_TOKENS"})...)
+	evs = append(evs, c.FinalEvents()...)
+	sig := pos(evs, func(e SSEEvent) bool {
+		d, _ := e.Data["delta"].(map[string]any)
+		return d["type"] == "signature_delta" && d["signature"] == "SIG"
+	})
+	text := pos(evs, func(e SSEEvent) bool { return deltas([]SSEEvent{e}, "text_delta", "text") == "done" })
+	if sig < 0 || text < sig || !strings.Contains(evs[len(evs)-2].String(), `"stop_reason":"max_tokens"`) {
+		t.Fatalf("%v", evs)
+	}
+	// redacted 思考单独成块。
+	r := NewStreamContext("m", 1, true, nil)
+	out := r.Process(&kiro.Event{Kind: kiro.EvReasoningSignature, Redacted: "QUJD"})
+	if len(out) != 2 || !strings.Contains(out[0].String(), `{"data":"QUJD","type":"redacted_thinking"}`) {
+		t.Fatalf("%v", out)
+	}
+}
+
+func TestUpstreamStreamErrorMapping(t *testing.T) {
+	c := NewStreamContext("m", 1, false, nil)
+	var rep UsageReport
+	c.SetOnUsage(func(r UsageReport) { rep = r })
+	c.Process(&kiro.Event{Kind: kiro.EvError, Code: "rate_limit_exceeded", ErrorType: "too_many_requests", Message: "slow down"})
+	e := c.UpstreamError()
+	if e == nil || e.Status != 429 || e.Type != "rate_limit_error" {
+		t.Fatalf("%+v", e)
+	}
+	out := c.FailWith(e, "x")
+	if len(out) != 1 || out[0].Event != "error" || !strings.Contains(out[0].String(), `{"message":"slow down","type":"rate_limit_error"}`) || rep.Status != 429 {
+		t.Fatalf("%v %+v", out, rep)
+	}
+	for code, want := range map[string]string{"context_length_exceeded": "invalid_request_error", "server_is_overloaded": "overloaded_error", "credit_balance_exhausted": "billing_error", "weird": "api_error"} {
+		if got := MapStreamError(code, "", "m").Type; got != want {
+			t.Errorf("%s => %s", code, got)
+		}
+	}
+}

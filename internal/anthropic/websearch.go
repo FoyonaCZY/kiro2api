@@ -47,23 +47,23 @@ func randString(n int, charset string) string {
 	return string(b)
 }
 
+// mcpRequest JSON-RPC 字段；profileArn 由 provider 按凭据插在 method 后面。
 type mcpRequest struct {
-	ID      string `json:"id"`
-	JSONRPC string `json:"jsonrpc"`
-	Method  string `json:"method"`
-	Params  struct {
+	ID     string `json:"id"`
+	Method string `json:"method"`
+	Params struct {
 		Name      string `json:"name"`
 		Arguments struct {
 			Query string `json:"query"`
 		} `json:"arguments"`
 	} `json:"params"`
+	JSONRPC string `json:"jsonrpc"`
 }
 
 func newMCPRequest(query string) (string, mcpRequest) {
 	var r mcpRequest
-	r.ID = fmt.Sprintf("web_search_tooluse_%s_%d_%s",
-		randString(22, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"),
-		time.Now().UnixMilli(), randString(8, "abcdefghijklmnopqrstuvwxyz0123456789"))
+	// IDE 用模型给的工具调用 id（tooluse_ + 22 位字母数字）作 JSON-RPC id。
+	r.ID = "tooluse_" + randString(22, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
 	r.JSONRPC, r.Method = "2.0", "tools/call"
 	r.Params.Name = "web_search"
 	r.Params.Arguments.Query = query

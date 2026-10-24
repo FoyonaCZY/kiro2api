@@ -81,38 +81,51 @@ func EnsurePersistentMachineID(c *Credentials) bool {
 	return true
 }
 
-// SDKVersion 额度查询仍走旧的 CodeWhisperer 客户端时用的 SDK 版本。
-const SDKVersion = "3.997.37"
+// 以下 UA 都是从 Kiro 1.4.26 自己的客户端代码里抓出来的原文格式。
+const (
+	// SmithyClientVersion KiroRuntime、KiroControlPlaneBearer、CodeWhispererRuntime 三个客户端包都是 1.0.0。
+	SmithyClientVersion = "1.0.0"
+	// SSOOIDCVersion IdC 刷新用的 @aws-sdk/client-sso-oidc。
+	SSOOIDCVersion = "3.980.0"
+	// ClientName ACP 客户端名，UA 里写成 acp-client/kiro-ide。
+	ClientName = "kiro-ide"
+	// smithyMetrics smithy 写在 UA 里的特性标记。
+	smithyMetrics = "m/N,E"
+)
 
-// RuntimeClientVersion Kiro 1.4.26 里 KiroRuntimeClient 的包版本，serviceId 是 KiroRuntime。
-const RuntimeClientVersion = "1.0.0"
-
-// RuntimeAPIName smithy 会把 serviceId 转成小写再放进 UA。
-const RuntimeAPIName = "kiroruntime"
-
-func runtimeCustom(cfg *config.Config, machineID string) string {
-	// smithy 会把自定义 UA 里的空格换成连字符。
-	return "KiroIDE-" + cfg.KiroVersion + "-" + machineID
+// smithyEscape 和 smithy 一样把 UA 段里不允许的字符换成连字符。
+func smithyEscape(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || strings.ContainsRune("!$%&'*+-.^_`|~/", r) {
+			return r
+		}
+		return '-'
+	}, s)
 }
 
-// RuntimeUserAgent 对话请求的 user-agent，对齐 1.4.26 的 KiroRuntimeClient。
-func RuntimeUserAgent(cfg *config.Config, machineID string) string {
-	return "aws-sdk-js/" + RuntimeClientVersion + " ua/2.1 os/" + cfg.SystemVersion + " lang/js md/nodejs#" + cfg.NodeVersion +
-		" api/" + RuntimeAPIName + "#" + RuntimeClientVersion + " m/E " + runtimeCustom(cfg, machineID)
+// ResponsesUserAgent /v1/responses 的 User-Agent。这条请求是 Node https 直接发的，不经过 smithy。
+func ResponsesUserAgent(cfg *config.Config, machineID string) string {
+	return "KiroIDE " + cfg.KiroVersion + " " + machineID + " KAS/" + cfg.KASVersion + " acp-client/" + ClientName
 }
 
-// RuntimeAmzUserAgent 对话请求的 x-amz-user-agent：只保留 aws-sdk-js 和自定义段。
-func RuntimeAmzUserAgent(cfg *config.Config, machineID string) string {
-	return "aws-sdk-js/" + RuntimeClientVersion + " " + runtimeCustom(cfg, machineID)
+// agentSmithyCustom Kiro Agent 里 smithy 客户端的自定义 UA（MCP、模型列表）。
+func agentSmithyCustom(cfg *config.Config, machineID string) string {
+	return smithyEscape("KiroIDE "+cfg.KiroVersion+" "+machineID+" KAS") + "/" + cfg.KASVersion + " acp-client/" + ClientName
 }
 
-// SDKUserAgent 对齐旧的 AWS SDK UA，额度查询还在用。
-func SDKUserAgent(cfg *config.Config, machineID, apiName string) string {
-	return "aws-sdk-js/" + SDKVersion + " ua/2.1 os/" + cfg.SystemVersion + " lang/js md/nodejs#" + cfg.NodeVersion +
-		" api/" + apiName + "#" + SDKVersion + " m/E KiroIDE " + cfg.KiroVersion + " " + machineID
+// extensionSmithyCustom 扩展侧 smithy 客户端（额度查询）的自定义 UA。
+func extensionSmithyCustom(cfg *config.Config, machineID string) string {
+	return smithyEscape("KiroIDE " + cfg.KiroVersion + " " + machineID)
 }
 
-// SocialRefreshUserAgent Social 刷新的 UA。
-func SocialRefreshUserAgent(cfg *config.Config, machineID string) string {
+// smithyUserAgents 返回 user-agent 和 x-amz-user-agent。
+func smithyUserAgents(cfg *config.Config, version, api, custom string) (string, string) {
+	ua := "aws-sdk-js/" + version + " ua/2.1 os/" + cfg.SystemVersion + " lang/js md/nodejs#" + cfg.NodeVersion +
+		" api/" + api + "#" + version + " " + smithyMetrics + " " + custom
+	return ua, "aws-sdk-js/" + version + " " + custom
+}
+
+// SocialUserAgent Social 登录和刷新（axios）的 User-Agent。
+func SocialUserAgent(cfg *config.Config, machineID string) string {
 	return "KiroIDE-" + cfg.KiroVersion + "-" + machineID
 }

@@ -1,23 +1,18 @@
 package kiro
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/FoyonaCZY/kiro2api/internal/config"
 	"github.com/FoyonaCZY/kiro2api/internal/httpx"
-	"github.com/google/uuid"
 )
 
 // RefreshTokenInvalidError 上游返回 invalid_grant，凭据要立即禁用。
@@ -77,29 +72,6 @@ func maskAPIKey(key string) string {
 	return "***"
 }
 
-func doJSON(ctx context.Context, client *http.Client, method, u string, body any, headers map[string]string, host string) (*http.Response, error) {
-	var rdr io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return nil, err
-		}
-		rdr = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, u, rdr)
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	if host != "" {
-		req.Host = host
-	}
-	req.Close = true
-	return client.Do(req)
-}
-
 func invalidGrant(status int, body string) bool {
 	return status == 400 && strings.Contains(body, `"invalid_grant"`) && strings.Contains(body, "Invalid refresh token provided")
 }
@@ -122,15 +94,11 @@ func RefreshToken(ctx context.Context, c *Credentials, cfg *config.Config, px *h
 			method = "idc"
 		}
 	}
-	client, err := httpx.New(px, 60*time.Second)
-	if err != nil {
-		return nil, err
-	}
 	switch strings.ToLower(method) {
 	case "idc", "builder-id", "iam":
-		return refreshIdc(ctx, client, c, cfg)
+		return refreshIdc(ctx, px, c, cfg)
 	default:
-		return refreshSocial(ctx, client, c, cfg)
+		return refreshSocial(ctx, px, c, cfg)
 	}
 }
 
@@ -156,37 +124,34 @@ func applyRefresh(c *Credentials, data refreshResp) *Credentials {
 	return n
 }
 
-func refreshSocial(ctx context.Context, client *http.Client, c *Credentials, cfg *config.Config) (*Credentials, error) {
+// refreshTimeout axios 10 秒超时，加上重试余量。
+const refreshTimeout = 60 * time.Second
+
+// refreshSocial Kiro 认证服务固定在 us-east-1，请求形状和 IDE 的 axios 客户端一致。
+func refreshSocial(ctx context.Context, px *httpx.Proxy, c *Credentials, cfg *config.Config) (*Credentials, error) {
 	slog.Info("正在刷新 Social Token...", "credential_id", c.ID)
-	region := c.EffectiveAuthRegion(cfg)
-	domain := "prod." + region + ".auth.desktop.kiro.dev"
-	mid := MachineIDFor(c, cfg)
-	resp, err := doJSON(ctx, client, http.MethodPost, "https://"+domain+"/refreshToken",
-		map[string]string{"refreshToken": c.RefreshToken}, map[string]string{
-			"Accept":          "application/json, text/plain, */*",
-			"Content-Type":    "application/json",
-			"User-Agent":      SocialRefreshUserAgent(cfg, mid),
-			"Accept-Encoding": "gzip, compress, deflate, br",
-		}, domain)
+	body, _ := MarshalNoEscape(map[string]string{"refreshToken": c.RefreshToken})
+	resp, err := httpx.DoIDE(ctx, px, SocialAuthRequest(cfg, MachineIDFor(c, cfg), "/refreshToken", body), refreshTimeout)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := readMaybeCompressed(resp)
+	raw, _ := readMaybeCompressed(resp)
 	if resp.StatusCode/100 != 2 {
-		if invalidGrant(resp.StatusCode, string(body)) {
-			return nil, &RefreshTokenInvalidError{"Social refreshToken 已失效 (invalid_grant): " + string(body)}
+		if invalidGrant(resp.StatusCode, string(raw)) {
+			return nil, &RefreshTokenInvalidError{"Social refreshToken 已失效 (invalid_grant): " + string(raw)}
 		}
-		return nil, fmt.Errorf("%s: %d %s", refreshErrMsg(resp.StatusCode, false), resp.StatusCode, body)
+		return nil, fmt.Errorf("%s: %d %s", refreshErrMsg(resp.StatusCode, false), resp.StatusCode, raw)
 	}
 	var data refreshResp
-	if err := json.Unmarshal(body, &data); err != nil {
+	if err := json.Unmarshal(raw, &data); err != nil {
 		return nil, err
 	}
 	return applyRefresh(c, data), nil
 }
 
-func refreshIdc(ctx context.Context, client *http.Client, c *Credentials, cfg *config.Config) (*Credentials, error) {
+// refreshIdc SSO OIDC CreateToken，body 字段按 smithy 的字母序。
+func refreshIdc(ctx context.Context, px *httpx.Proxy, c *Credentials, cfg *config.Config) (*Credentials, error) {
 	slog.Info("正在刷新 IdC Token...", "credential_id", c.ID)
 	if c.ClientID == "" {
 		return nil, errors.New("IdC 刷新需要 clientId")
@@ -194,31 +159,23 @@ func refreshIdc(ctx context.Context, client *http.Client, c *Credentials, cfg *c
 	if c.ClientSecret == "" {
 		return nil, errors.New("IdC 刷新需要 clientSecret")
 	}
-	region := c.EffectiveAuthRegion(cfg)
-	host := "oidc." + region + ".amazonaws.com"
-	ua := SDKUserAgent(cfg, MachineIDFor(c, cfg), "sso-oidc")
-	resp, err := doJSON(ctx, client, http.MethodPost, "https://"+host+"/token", map[string]string{
-		"clientId": c.ClientID, "clientSecret": c.ClientSecret, "refreshToken": c.RefreshToken, "grantType": "refresh_token",
-	}, map[string]string{
-		"content-type":          "application/json",
-		"x-amz-user-agent":      ua,
-		"user-agent":            ua,
-		"amz-sdk-invocation-id": uuid.NewString(),
-		"amz-sdk-request":       "attempt=1; max=4",
-	}, host)
+	body, _ := MarshalNoEscape(map[string]string{
+		"clientId": c.ClientID, "clientSecret": c.ClientSecret, "grantType": "refresh_token", "refreshToken": c.RefreshToken,
+	})
+	resp, err := httpx.DoIDE(ctx, px, IdCTokenRequest(cfg, c.EffectiveAuthRegion(cfg), body), refreshTimeout)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := readMaybeCompressed(resp)
+	raw, _ := readMaybeCompressed(resp)
 	if resp.StatusCode/100 != 2 {
-		if invalidGrant(resp.StatusCode, string(body)) {
-			return nil, &RefreshTokenInvalidError{"IdC refreshToken 已失效 (invalid_grant): " + string(body)}
+		if invalidGrant(resp.StatusCode, string(raw)) {
+			return nil, &RefreshTokenInvalidError{"IdC refreshToken 已失效 (invalid_grant): " + string(raw)}
 		}
-		return nil, fmt.Errorf("%s: %d %s", refreshErrMsg(resp.StatusCode, true), resp.StatusCode, body)
+		return nil, fmt.Errorf("%s: %d %s", refreshErrMsg(resp.StatusCode, true), resp.StatusCode, raw)
 	}
 	var data refreshResp
-	if err := json.Unmarshal(body, &data); err != nil {
+	if err := json.Unmarshal(raw, &data); err != nil {
 		return nil, err
 	}
 	return applyRefresh(c, data), nil
@@ -295,30 +252,10 @@ func (u *UsageLimits) Totals() (usage, limit float64) {
 	return usage, limit
 }
 
-// FetchUsageLimits 查询额度。
+// FetchUsageLimits 查询额度：Kiro 1.4.26 改走 management.{region}.kiro.dev。
 func FetchUsageLimits(ctx context.Context, c *Credentials, cfg *config.Config, token string, px *httpx.Proxy) (*UsageLimits, error) {
-	region := c.EffectiveAPIRegion(cfg)
-	host := "q." + region + ".amazonaws.com"
-	ua := SDKUserAgent(cfg, MachineIDFor(c, cfg), "codewhispererruntime")
-	u := "https://" + host + "/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
-	if c.ProfileArn != "" {
-		u += "&profileArn=" + url.QueryEscape(c.ProfileArn)
-	}
-	client, err := httpx.New(px, 60*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	h := map[string]string{
-		"x-amz-user-agent":      ua,
-		"user-agent":            ua,
-		"amz-sdk-invocation-id": uuid.NewString(),
-		"amz-sdk-request":       "attempt=1; max=1",
-		"Authorization":         "Bearer " + token,
-	}
-	if tt := c.UpstreamTokenType(); tt != "" {
-		h["TokenType"] = tt
-	}
-	resp, err := doJSON(ctx, client, http.MethodGet, u, nil, h, host)
+	rc := &RequestContext{Cred: c, Token: token, MachineID: MachineIDFor(c, cfg), Config: cfg}
+	resp, err := httpx.DoIDE(ctx, px, UsageLimitsRequest(rc), refreshTimeout)
 	if err != nil {
 		return nil, err
 	}

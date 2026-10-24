@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -24,6 +22,7 @@ import (
 
 // Social（GitHub / Google）登录，对齐 Kiro IDE：生成 app.kiro.dev/signin 链接，
 // 浏览器回调到 http://localhost:3128，把回调 URL 贴回来后用同一条 SOCKS5 换 refresh token。
+// 换码地址和 IDE 一样固定在 us-east-1 的认证服务。
 const (
 	authPortal     = "https://app.kiro.dev"
 	redirectOrigin = "http://localhost:3128"
@@ -204,24 +203,17 @@ func exchangeSocialCode(ctx context.Context, cfg *config.Config, p pendingLogin,
 	if p.proxyUsername != "" && p.proxyPassword != "" {
 		px.Username, px.Password = p.proxyUsername, p.proxyPassword
 	}
-	cl, err := httpx.New(px, 60*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	body, _ := json.Marshal(map[string]string{"code": cb.code, "code_verifier": p.codeVerifier, "redirect_uri": cb.exchangeRedirect()})
-	tokenURL := "https://prod." + cfg.EffectiveAuthRegion() + ".auth.desktop.kiro.dev/oauth/token"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", kiro.SocialRefreshUserAgent(cfg, p.machineID))
-	resp, err := cl.Do(req)
+	body, _ := kiro.MarshalNoEscape(map[string]string{"code": cb.code, "code_verifier": p.codeVerifier, "redirect_uri": cb.exchangeRedirect()})
+	resp, err := httpx.DoIDE(ctx, px, kiro.SocialAuthRequest(cfg, p.machineID, "/oauth/token", body), 60*time.Second)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	dec, err := kiro.DecodeBody(resp)
+	if err != nil {
+		return nil, err
+	}
+	raw, _ := io.ReadAll(io.LimitReader(dec, 1<<20))
 	if resp.StatusCode/100 != 2 {
 		text := strings.TrimSpace(string(raw))
 		if len(text) > 180 {

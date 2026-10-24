@@ -1,13 +1,19 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { formatCNY, formatCostRatio, getAccountCosts, setAccountCost, type AccountCost } from '@/api/usage'
+import { formatCNY, formatCostRatio, formatCredits, getAccountCosts, setAccountCost, type AccountCost } from '@/api/usage'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { extractErrorMessage } from '@/lib/utils'
 
 function usd(value: number) {
   return `$${value.toFixed(4)}`
+}
+
+/** 成本 ¥ ÷ 上游扣的 credits，没填成本或没有 credits 时不算 */
+function perCredit(cny: number | null, credits: number) {
+  if (cny == null || credits <= 0) return '—'
+  return formatCNY(cny / credits)
 }
 
 /**
@@ -48,6 +54,8 @@ export function AccountCosts() {
   }
 
   const data = report.data
+  const costed = (data?.accounts ?? []).filter((row) => row.costCny != null)
+  const costedCredits = costed.reduce((sum, row) => sum + row.credits, 0)
 
   return (
     <section className="space-y-3">
@@ -56,22 +64,25 @@ export function AccountCosts() {
         {data ? (
           <p className="text-sm text-muted-foreground">
             已填 {data.costedAccounts} 个 · 合计 {formatCNY(data.costCny)} · 对应消耗 {usd(data.costedUsageUsd)} · 合计倍率{' '}
-            <span className="font-medium text-foreground">{formatCostRatio(data.costRatio)}</span> · 全部消耗 {usd(data.usageUsd)}
+            <span className="font-medium text-foreground">{formatCostRatio(data.costRatio)}</span> · 全部消耗 {usd(data.usageUsd)} · 上游 credits {formatCredits(data.credits)}
+            {costedCredits > 0 ? <> · 已填账号 {perCredit(data.costCny, costedCredits)}/credit</> : null}
           </p>
         ) : null}
       </div>
       <p className="text-sm text-muted-foreground">
-        成本填买入这个账号花的人民币，留空表示未知，不参与合计；填 0 表示免费账号。倍率 = 成本 ¥ ÷ 累计消耗 $，累计消耗按上面的当前单价从全部历史 token 重算。
+        成本填买入这个账号花的人民币，留空表示未知，不参与合计；填 0 表示免费账号。倍率 = 成本 ¥ ÷ 累计消耗 $，累计消耗按上面的当前单价从全部历史 token 重算。Credits 是上游 usage 里实际报的扣费，¥/credit = 成本 ¥ ÷ credits；升级前的老请求没有 credits。
       </p>
       {report.error ? <p className="text-sm text-destructive">{extractErrorMessage(report.error)}</p> : null}
       <div className="overflow-x-auto rounded-md border">
-        <table className="w-full min-w-[760px] text-left text-sm">
+        <table className="w-full min-w-[920px] text-left text-sm">
           <thead className="border-b bg-card text-muted-foreground">
             <tr>
               <th className="px-3 py-2 font-medium">账号</th>
               <th className="px-3 py-2 font-medium">成本 ¥</th>
               <th className="px-3 py-2 font-medium">累计消耗</th>
               <th className="px-3 py-2 font-medium" title="成本 ¥ ÷ 累计消耗 $">倍率</th>
+              <th className="px-3 py-2 font-medium" title="上游 usage 里报的 kiro:credits">Credits</th>
+              <th className="px-3 py-2 font-medium" title="成本 ¥ ÷ credits">¥/credit</th>
               <th className="px-3 py-2 font-medium">请求</th>
               <th className="px-3 py-2 font-medium">未定价</th>
             </tr>
@@ -107,6 +118,8 @@ export function AccountCosts() {
                   </td>
                   <td className="px-3 py-2">{usd(row.usageUsd)}</td>
                   <td className="px-3 py-2 font-medium">{formatCostRatio(row.costRatio)}</td>
+                  <td className="px-3 py-2">{formatCredits(row.credits)}</td>
+                  <td className="px-3 py-2">{perCredit(row.costCny, row.credits)}</td>
                   <td className="px-3 py-2">
                     {row.requests}
                     {row.errors ? <span className="ml-1 text-xs text-muted-foreground">（失败 {row.errors}）</span> : null}
@@ -116,7 +129,7 @@ export function AccountCosts() {
               )
             })}
             {data && data.accounts.length === 0 ? (
-              <tr><td className="px-3 py-6 text-muted-foreground" colSpan={6}>还没有账号。</td></tr>
+              <tr><td className="px-3 py-6 text-muted-foreground" colSpan={8}>还没有账号。</td></tr>
             ) : null}
           </tbody>
         </table>

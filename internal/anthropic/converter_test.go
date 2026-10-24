@@ -80,23 +80,32 @@ func TestConvertRequestHistoryAndTools(t *testing.T) {
 		t.Fatalf("%+v", st)
 	}
 	cur := st.CurrentMessage.UserInputMessage
-	if cur.ModelID != "claude-opus-5.5" || cur.Content != "next" || len(cur.UserInputMessageContext.ToolResults) != 1 || cur.UserInputMessageContext.ToolResults[0].ToolUseID != "t1" {
+	// t1 有结果；t2 没有结果，照 IDE 补一条失败结果；孤立的 zz 丢掉。
+	rs := cur.UserInputMessageContext.ToolResults
+	if cur.ModelID != "claude-opus-5.5" || cur.Content != "next" || len(rs) != 2 || rs[0].ToolUseID != "t1" ||
+		rs[1].ToolUseID != "t2" || rs[1].Status != "error" || rs[1].Content[0]["text"] != toolFailedText {
 		t.Fatalf("current %+v", cur)
+	}
+	if st.AgentContinuationID == st.ConversationID || len(st.AgentContinuationID) != 36 || res.CallPosition != 0 {
+		t.Fatalf("identity %s %d", st.AgentContinuationID, res.CallPosition)
 	}
 	// 系统提示在历史里，不进 instructions。free 账号会拒绝 instructions。
 	if res.Instructions != "" || len(st.History) != 4 {
 		t.Fatalf("history len %d instructions %q", len(st.History), res.Instructions)
 	}
+	// 思考标签不再写进系统提示，由 provider 按模型决定用 reasoning 字段还是标签。
 	sys := st.History[0].User.Content
-	if !strings.HasPrefix(sys, "<thinking_mode>enabled</thinking_mode><max_thinking_length>24576</max_thinking_length>\nbe nice\n") {
+	if !strings.HasPrefix(sys, "be nice\n") || !res.HasSystem || st.History[1].Assistant.Content != "I will follow these instructions." {
 		t.Fatal(sys)
 	}
-	asst := st.History[3].Assistant
-	if asst.Content != "<thinking>hmm</thinking>\n\nreading" {
-		t.Fatal(asst.Content)
+	if res.Thinking == nil || !res.Thinking.Enabled || res.Thinking.Prefix != "<thinking_mode>enabled</thinking_mode><max_thinking_length>24576</max_thinking_length>" {
+		t.Fatalf("%+v", res.Thinking)
 	}
-	// t2 未配对，被移除；t1 保留
-	if len(asst.ToolUses) != 1 || asst.ToolUses[0].ToolUseID != "t1" {
+	asst := st.History[3].Assistant
+	if asst.Content != "reading" || asst.Reasoning == nil || asst.Reasoning.Text != "hmm" {
+		t.Fatalf("%+v", asst)
+	}
+	if len(asst.ToolUses) != 2 || asst.ToolUses[0].ToolUseID != "t1" || asst.ToolUses[1].ToolUseID != "t2" {
 		t.Fatalf("%+v", asst.ToolUses)
 	}
 	if len(res.ToolNameMap) != 1 {
@@ -105,7 +114,7 @@ func TestConvertRequestHistoryAndTools(t *testing.T) {
 	names := map[string]bool{}
 	for _, tl := range cur.UserInputMessageContext.Tools {
 		names[tl.ToolSpecification.Name] = true
-		if len(tl.ToolSpecification.Name) > 63 {
+		if len(tl.ToolSpecification.Name) > 64 {
 			t.Fatal("tool name too long")
 		}
 		if tl.ToolSpecification.Name == "Write" {
@@ -114,8 +123,9 @@ func TestConvertRequestHistoryAndTools(t *testing.T) {
 			}
 		}
 	}
-	if !names["Read"] {
-		t.Fatal("placeholder for history tool Read missing")
+	// 请求本身带了工具时不再给历史工具补占位定义。
+	if names["Read"] {
+		t.Fatal("unexpected placeholder for Read")
 	}
 	b, _ := Marshal(KiroBody(res))
 	if strings.Contains(string(b), `\u003c`) {
@@ -135,7 +145,49 @@ func TestConvertErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := res.State.History
-	if res.Instructions != "" || len(h) != 4 || h[2].User.Content != "a" || h[3].Assistant.Content != "OK" {
+	if res.Instructions != "" || len(h) != 4 || h[2].User.Content != "a" || h[3].Assistant.Content != alternationFiller {
 		t.Fatalf("%+v", h)
+	}
+}
+
+func TestToolNamesFollowKiro(t *testing.T) {
+	n := newToolNamer()
+	long := strings.Repeat("a", 70)
+	if n.name("Read") != "Read" || n.name("mcp.server/tool") != "mcp_server_tool" || n.name("mcp_server_tool") != "mcp_server_tool_1" {
+		t.Fatalf("%v", n.fwd)
+	}
+	if got := n.name(long); got != strings.Repeat("a", 64) {
+		t.Fatal(got)
+	}
+	if got := n.name(long + "b"); got != strings.Repeat("a", 62)+"_1" {
+		t.Fatal(got)
+	}
+	if n.rev["mcp_server_tool"] != "mcp.server/tool" || n.rev["mcp_server_tool_1"] != "mcp_server_tool" || n.name("") != "tool" {
+		t.Fatalf("%v", n.rev)
+	}
+	if toolDescription(" ", "Read") != "Read" || toolDescription("", " ") != "tool" {
+		t.Fatal("description fallback")
+	}
+}
+
+func TestCallPositionAndContinuation(t *testing.T) {
+	body := `{"model":"claude-opus-5","metadata":{"user_id":"u_session_0b4445e1-f5be-49e1-87ce-62bbc28ad705"},"tools":[{"name":"Read","description":"r","input_schema":{}}],"messages":[
+		{"role":"user","content":"do it"},
+		{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]},
+		{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Read","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"y"}]}]}`
+	a, err := ConvertRequest(mustReq(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.CallPosition != 2 {
+		t.Fatal(a.CallPosition)
+	}
+	// 同一轮里 continuation id 不变，新一轮换新的。
+	first, _ := ConvertRequest(mustReq(t, `{"model":"claude-opus-5","metadata":{"user_id":"u_session_0b4445e1-f5be-49e1-87ce-62bbc28ad705"},"messages":[{"role":"user","content":"do it"}]}`))
+	next, _ := ConvertRequest(mustReq(t, strings.Replace(body, `"content":"y"}]}]}`, `"content":"y"},{"type":"text","text":"again"}]}]}`, 1)))
+	if first.State.AgentContinuationID != a.State.AgentContinuationID || next.State.AgentContinuationID == a.State.AgentContinuationID || next.CallPosition != 0 {
+		t.Fatal(first.State.AgentContinuationID, a.State.AgentContinuationID, next.State.AgentContinuationID, next.CallPosition)
 	}
 }

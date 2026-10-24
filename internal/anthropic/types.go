@@ -130,6 +130,8 @@ type ContentBlock struct {
 	Type      string          `json:"type"`
 	Text      *string         `json:"text,omitempty"`
 	Thinking  *string         `json:"thinking,omitempty"`
+	Signature *string         `json:"signature,omitempty"`
+	Data      *string         `json:"data,omitempty"`
 	ToolUseID *string         `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
 	Name      *string         `json:"name,omitempty"`
