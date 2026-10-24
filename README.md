@@ -36,7 +36,7 @@ go vet ./... && go test ./...
 
 `Deploy` 工作流只能在 Actions 页面手动运行，需要仓库 Secrets：`DEPLOY_HOST`、`DEPLOY_USER`、`DEPLOY_PASSWORD`。
 
-它在 `103.245.231.162` 上启动 `kiro2api`，数据目录是 `/opt/kiro2api/config`。Caddy 把 `https://kiro.skd.moe` 反代到本机 `127.0.0.1:8990`。第一次部署前，这个目录里要已经有 `config.json`。
+它在 `103.245.231.162` 上启动 `kiro2api`，数据目录是 `/opt/kiro2api/config`。这台机器已有 nginx，`https://kiro.skd.moe` 反代到 `127.0.0.1:8990`。第一次部署前，这个目录里要已经有 `config.json`。
 
 ## 与 kiro.rs 的差异
 

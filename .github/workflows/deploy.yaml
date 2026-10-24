@@ -28,7 +28,7 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           password: ${{ secrets.DEPLOY_PASSWORD }}
           port: 22
-          source: kiro2api.tar.gz,docker-compose.deploy.yml,Caddyfile
+          source: kiro2api.tar.gz,docker-compose.deploy.yml
           target: /opt/kiro-deploy
           overwrite: true
 
@@ -50,7 +50,6 @@ jobs:
             fi
             gunzip -c /opt/kiro-deploy/kiro2api.tar.gz | $DOCKER load
             cp /opt/kiro-deploy/docker-compose.deploy.yml "$DATA/docker-compose.kiro2api.yml"
-            cp /opt/kiro-deploy/Caddyfile "$DATA/Caddyfile"
             if $DOCKER ps -q --filter name=^kiro-rs$ | grep -q .; then $DOCKER stop kiro-rs; fi
             cd "$DATA"
             $DOCKER compose -p kiro2api -f docker-compose.kiro2api.yml up -d --force-recreate
