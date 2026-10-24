@@ -83,14 +83,15 @@ func TestConvertRequestHistoryAndTools(t *testing.T) {
 	if cur.ModelID != "claude-opus-5.5" || cur.Content != "next" || len(cur.UserInputMessageContext.ToolResults) != 1 || cur.UserInputMessageContext.ToolResults[0].ToolUseID != "t1" {
 		t.Fatalf("current %+v", cur)
 	}
-	// 系统提示进 instructions，不再伪造一问一答。历史只剩 user hi 和合并后的 assistant。
-	if len(st.History) != 2 {
-		t.Fatalf("history len %d", len(st.History))
+	// 系统提示在历史里，不进 instructions。free 账号会拒绝 instructions。
+	if res.Instructions != "" || len(st.History) != 4 {
+		t.Fatalf("history len %d instructions %q", len(st.History), res.Instructions)
 	}
-	if !strings.HasPrefix(res.Instructions, "<thinking_mode>enabled</thinking_mode><max_thinking_length>24576</max_thinking_length>\nbe nice\n") {
-		t.Fatal(res.Instructions)
+	sys := st.History[0].User.Content
+	if !strings.HasPrefix(sys, "<thinking_mode>enabled</thinking_mode><max_thinking_length>24576</max_thinking_length>\nbe nice\n") {
+		t.Fatal(sys)
 	}
-	asst := st.History[1].Assistant
+	asst := st.History[3].Assistant
 	if asst.Content != "<thinking>hmm</thinking>\n\nreading" {
 		t.Fatal(asst.Content)
 	}
@@ -134,7 +135,7 @@ func TestConvertErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := res.State.History
-	if !strings.Contains(res.Instructions, "sys") || len(h) != 2 || h[0].User.Content != "a" || h[1].Assistant.Content != "OK" {
+	if res.Instructions != "" || len(h) != 4 || h[2].User.Content != "a" || h[3].Assistant.Content != "OK" {
 		t.Fatalf("%+v", h)
 	}
 }

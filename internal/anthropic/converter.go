@@ -420,8 +420,12 @@ func systemInstructions(req *MessagesRequest) string {
 	return sys
 }
 
-func buildHistory(msgs []Message, model string, names map[string]string) []kiro.HistoryMessage {
+func buildHistory(req *MessagesRequest, msgs []Message, model string, names map[string]string) []kiro.HistoryMessage {
 	var history []kiro.HistoryMessage
+	if sys := systemInstructions(req); sys != "" {
+		// 免费账号的 /v1/responses 拒绝 instructions（systemPrompt 未开通）。系统提示放进对话，和客户端实验关闭时一样。
+		history = append(history, userHistory(sys, model), assistantHistory("I will follow these instructions."))
+	}
 	var ub, ab []Message
 	for _, m := range msgs[:len(msgs)-1] {
 		switch m.Role {
@@ -549,7 +553,7 @@ func ConvertRequest(req *MessagesRequest) (*ConversionResult, error) {
 	text, images, results := processContent(msgs[len(msgs)-1].Content)
 	names := map[string]string{}
 	tools := convertTools(req.Tools, names)
-	history := buildHistory(msgs, model, names)
+	history := buildHistory(req, msgs, model, names)
 	results, orphaned := validateToolPairing(history, results)
 	removeOrphanedToolUses(history, orphaned)
 
@@ -573,7 +577,6 @@ func ConvertRequest(req *MessagesRequest) (*ConversionResult, error) {
 	}
 	limitHistoryImages(history, len(images))
 	return &ConversionResult{
-		Instructions: systemInstructions(req),
 		State: kiro.ConversationState{
 			AgentContinuationID: convID,
 			AgentTaskType:       "vibe",
