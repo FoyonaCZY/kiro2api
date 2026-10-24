@@ -80,8 +80,19 @@ func TestMachineID(t *testing.T) {
 		t.Fatal("fallback must be stable")
 	}
 	ua := SDKUserAgent(config.Default(), strings.Repeat("ab", 32), "codewhispererstreaming")
-	if !strings.Contains(ua, "os/win32#10.0.26200") || !strings.Contains(ua, "KiroIDE 1.1.70 ") || strings.Contains(ua, "x64") {
+	if !strings.Contains(ua, "os/win32#10.0.26200") || !strings.Contains(ua, "KiroIDE 1.4.26 ") || strings.Contains(ua, "x64") {
 		t.Fatal(ua)
+	}
+	rt := RuntimeUserAgent(config.Default(), strings.Repeat("ab", 32))
+	if !strings.Contains(rt, "aws-sdk-js/1.0.0") || !strings.Contains(rt, "api/kiroruntime#1.0.0") || !strings.Contains(rt, "md/nodejs#24.21.0") || !strings.Contains(rt, "KiroIDE-1.4.26-") {
+		t.Fatal(rt)
+	}
+	ctx := &RequestContext{Cred: &Credentials{APIRegion: "eu-central-1"}, Config: config.Default()}
+	if got := (IDE{}).APIURL(ctx); got != "https://runtime.eu-central-1.kiro.dev/generateAssistantResponse" {
+		t.Fatal(got)
+	}
+	if got := (KRS{}).MCPURL(ctx); got != "https://runtime.eu-central-1.kiro.dev/mcp" {
+		t.Fatal(got)
 	}
 }
 

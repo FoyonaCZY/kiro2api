@@ -81,10 +81,32 @@ func EnsurePersistentMachineID(c *Credentials) bool {
 	return true
 }
 
-// SDKVersion 安装包里 @aws-sdk/nested-clients 的版本。
+// SDKVersion 额度查询仍走旧的 CodeWhisperer 客户端时用的 SDK 版本。
 const SDKVersion = "3.997.37"
 
-// SDKUserAgent 对齐 Kiro IDE 的 AWS SDK UA。
+// RuntimeClientVersion Kiro 1.4.26 里 KiroRuntimeClient 的包版本，serviceId 是 KiroRuntime。
+const RuntimeClientVersion = "1.0.0"
+
+// RuntimeAPIName smithy 会把 serviceId 转成小写再放进 UA。
+const RuntimeAPIName = "kiroruntime"
+
+func runtimeCustom(cfg *config.Config, machineID string) string {
+	// smithy 会把自定义 UA 里的空格换成连字符。
+	return "KiroIDE-" + cfg.KiroVersion + "-" + machineID
+}
+
+// RuntimeUserAgent 对话请求的 user-agent，对齐 1.4.26 的 KiroRuntimeClient。
+func RuntimeUserAgent(cfg *config.Config, machineID string) string {
+	return "aws-sdk-js/" + RuntimeClientVersion + " ua/2.1 os/" + cfg.SystemVersion + " lang/js md/nodejs#" + cfg.NodeVersion +
+		" api/" + RuntimeAPIName + "#" + RuntimeClientVersion + " m/E " + runtimeCustom(cfg, machineID)
+}
+
+// RuntimeAmzUserAgent 对话请求的 x-amz-user-agent：只保留 aws-sdk-js 和自定义段。
+func RuntimeAmzUserAgent(cfg *config.Config, machineID string) string {
+	return "aws-sdk-js/" + RuntimeClientVersion + " " + runtimeCustom(cfg, machineID)
+}
+
+// SDKUserAgent 对齐旧的 AWS SDK UA，额度查询还在用。
 func SDKUserAgent(cfg *config.Config, machineID, apiName string) string {
 	return "aws-sdk-js/" + SDKVersion + " ua/2.1 os/" + cfg.SystemVersion + " lang/js md/nodejs#" + cfg.NodeVersion +
 		" api/" + apiName + "#" + SDKVersion + " m/E KiroIDE " + cfg.KiroVersion + " " + machineID

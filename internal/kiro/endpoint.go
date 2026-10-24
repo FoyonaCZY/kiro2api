@@ -12,8 +12,18 @@ import (
 const (
 	EndpointIDE = "ide"
 	EndpointKRS = "krs"
-	krsHost     = "runtime.us-east-1.kiro.dev"
 )
+
+// runtimeHost Kiro 1.4.26 的对话和 MCP 都打到 runtime.{region}.kiro.dev，不再走 q.*.amazonaws.com。
+func runtimeHost(ctx *RequestContext) string {
+	region := "us-east-1"
+	if ctx != nil && ctx.Cred != nil && ctx.Config != nil {
+		if r := ctx.Cred.EffectiveAPIRegion(ctx.Config); r != "" {
+			region = r
+		}
+	}
+	return "runtime." + region + ".kiro.dev"
+}
 
 // EffectiveEndpointName OAuth 未指定时走 krs（旧配置里的 ide 默认值也按 krs）；
 // API Key 落到 krs 时改走 ide；凭据显式写的端点保留。
@@ -91,28 +101,28 @@ func setTokenType(h http.Header, c *Credentials) {
 	}
 }
 
-// IDE Amazon Q 端点。
+// IDE 历史名字。1.4.26 起和 KRS 打同一个 runtime.{region}.kiro.dev。
 type IDE struct{}
 
-func (IDE) Name() string { return EndpointIDE }
-func (IDE) host(ctx *RequestContext) string {
-	return "q." + ctx.Cred.EffectiveAPIRegion(ctx.Config) + ".amazonaws.com"
-}
+func (IDE) Name() string                    { return EndpointIDE }
+func (IDE) host(ctx *RequestContext) string { return runtimeHost(ctx) }
 func (e IDE) APIURL(ctx *RequestContext) string {
 	return "https://" + e.host(ctx) + "/generateAssistantResponse"
 }
 func (e IDE) MCPURL(ctx *RequestContext) string { return "https://" + e.host(ctx) + "/mcp" }
 func (IDE) ua(ctx *RequestContext) string {
-	return SDKUserAgent(ctx.Config, ctx.MachineID, "codewhispererstreaming")
+	return RuntimeUserAgent(ctx.Config, ctx.MachineID)
+}
+func (IDE) amzUA(ctx *RequestContext) string {
+	return RuntimeAmzUserAgent(ctx.Config, ctx.MachineID)
 }
 
 func (e IDE) DecorateAPI(r *http.Request, ctx *RequestContext) {
-	ua := e.ua(ctx)
 	h := r.Header
 	h.Set("x-amzn-codewhisperer-optout", "true")
 	h.Set("x-amzn-kiro-agent-mode", ctx.Config.AgentMode)
-	h.Set("x-amz-user-agent", ua)
-	h.Set("user-agent", ua)
+	h.Set("x-amz-user-agent", e.amzUA(ctx))
+	h.Set("user-agent", e.ua(ctx))
 	h.Set("amz-sdk-invocation-id", uuid.NewString())
 	h.Set("amz-sdk-request", "attempt=1; max=3")
 	h.Set("Authorization", "Bearer "+ctx.Token)
@@ -121,10 +131,9 @@ func (e IDE) DecorateAPI(r *http.Request, ctx *RequestContext) {
 }
 
 func (e IDE) DecorateMCP(r *http.Request, ctx *RequestContext) {
-	ua := e.ua(ctx)
 	h := r.Header
-	h.Set("x-amz-user-agent", ua)
-	h.Set("user-agent", ua)
+	h.Set("x-amz-user-agent", e.amzUA(ctx))
+	h.Set("user-agent", e.ua(ctx))
 	h.Set("amz-sdk-invocation-id", uuid.NewString())
 	h.Set("amz-sdk-request", "attempt=1; max=3")
 	h.Set("Authorization", "Bearer "+ctx.Token)
@@ -140,11 +149,10 @@ func (IDE) TransformAPIBody(b string, ctx *RequestContext) string {
 }
 
 func (e IDE) APILogHeaders(ctx *RequestContext) [][2]string {
-	ua := e.ua(ctx)
 	h := [][2]string{
 		{"content-type", "application/json"}, {"Connection", "close"},
 		{"x-amzn-codewhisperer-optout", "true"}, {"x-amzn-kiro-agent-mode", ctx.Config.AgentMode},
-		{"x-amz-user-agent", ua}, {"user-agent", ua}, {"host", e.host(ctx)},
+		{"x-amz-user-agent", e.amzUA(ctx)}, {"user-agent", e.ua(ctx)}, {"host", e.host(ctx)},
 		{"amz-sdk-request", "attempt=1; max=3"}, {"Authorization", "Bearer ***"},
 	}
 	if tt := ctx.Cred.UpstreamTokenType(); tt != "" {
@@ -153,19 +161,18 @@ func (e IDE) APILogHeaders(ctx *RequestContext) [][2]string {
 	return h
 }
 
-// KRS Kiro Runtime Service，只接受 OAuth；MCP 仍走 Q。
+// KRS 与 IDE 现在打同一个 KiroRuntime 主机。名字还留着，是为了不改已有凭据上的 endpoint 字段。
 type KRS struct{}
 
-func (KRS) Name() string                  { return EndpointKRS }
-func (KRS) APIURL(*RequestContext) string { return "https://" + krsHost + "/generateAssistantResponse" }
-func (KRS) MCPURL(ctx *RequestContext) string {
-	return "https://q." + ctx.Cred.EffectiveAPIRegion(ctx.Config) + ".amazonaws.com/mcp"
+func (KRS) Name() string                    { return EndpointKRS }
+func (KRS) host(ctx *RequestContext) string { return runtimeHost(ctx) }
+func (e KRS) APIURL(ctx *RequestContext) string {
+	return "https://" + e.host(ctx) + "/generateAssistantResponse"
 }
-func (KRS) ua(ctx *RequestContext) string {
-	return "KiroIDE " + ctx.Config.KiroVersion + " " + ctx.MachineID
-}
+func (e KRS) MCPURL(ctx *RequestContext) string { return "https://" + e.host(ctx) + "/mcp" }
+func (KRS) ua(ctx *RequestContext) string       { return RuntimeUserAgent(ctx.Config, ctx.MachineID) }
 func (KRS) amzUA(ctx *RequestContext) string {
-	return "aws-sdk-js/" + SDKVersion + " KiroIDE-" + ctx.Config.KiroVersion + "-" + ctx.MachineID
+	return RuntimeAmzUserAgent(ctx.Config, ctx.MachineID)
 }
 
 func (e KRS) DecorateAPI(r *http.Request, ctx *RequestContext) {
@@ -181,7 +188,7 @@ func (e KRS) DecorateAPI(r *http.Request, ctx *RequestContext) {
 	if ctx.Cred.ProfileArn != "" {
 		h.Set("x-amzn-kiro-profile-arn", ctx.Cred.ProfileArn)
 	}
-	r.Host = krsHost
+	r.Host = e.host(ctx)
 	setTokenType(h, ctx.Cred)
 }
 
@@ -195,7 +202,7 @@ func (e KRS) DecorateMCP(r *http.Request, ctx *RequestContext) {
 	if ctx.Cred.ProfileArn != "" {
 		h.Set("x-amzn-kiro-profile-arn", ctx.Cred.ProfileArn)
 	}
-	r.Host = "q." + ctx.Cred.EffectiveAPIRegion(ctx.Config) + ".amazonaws.com"
+	r.Host = e.host(ctx)
 	setTokenType(h, ctx.Cred)
 }
 
@@ -207,7 +214,7 @@ func (e KRS) APILogHeaders(ctx *RequestContext) [][2]string {
 	h := [][2]string{
 		{"content-type", "application/json"}, {"Accept", "*/*"}, {"Connection", "close"},
 		{"x-amzn-codewhisperer-optout", "true"}, {"x-amzn-kiro-agent-mode", ctx.Config.AgentMode},
-		{"x-amz-user-agent", e.amzUA(ctx)}, {"user-agent", e.ua(ctx)}, {"host", krsHost},
+		{"x-amz-user-agent", e.amzUA(ctx)}, {"user-agent", e.ua(ctx)}, {"host", e.host(ctx)},
 		{"amz-sdk-request", "attempt=1; max=3"}, {"Authorization", "Bearer ***"},
 	}
 	if ctx.Cred.ProfileArn != "" {
