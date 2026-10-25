@@ -20,6 +20,7 @@ import (
 
 	"github.com/FoyonaCZY/kiro2api/internal/access"
 	"github.com/FoyonaCZY/kiro2api/internal/anthropic"
+	"github.com/FoyonaCZY/kiro2api/internal/httpx"
 	"github.com/FoyonaCZY/kiro2api/internal/kiro"
 	"github.com/FoyonaCZY/kiro2api/internal/usage"
 )
@@ -232,6 +233,8 @@ func (s *Service) Routes(mux *http.ServeMux) {
 	h("GET "+p+"/credentials/{id}/balance", s.balance)
 	h("GET "+p+"/config/load-balancing", s.getMode)
 	h("PUT "+p+"/config/load-balancing", s.setMode)
+	h("GET "+p+"/config/proxy", s.getProxy)
+	h("PUT "+p+"/config/proxy", s.setProxy)
 	h("POST "+p+"/social-login/start", s.socialStart)
 	h("POST "+p+"/social-login/complete", s.socialComplete)
 	h("GET "+p+"/usage/requests", func(w http.ResponseWriter, _ *http.Request) { anthropic.WriteJSON(w, 200, s.Usage.List(200)) })
@@ -575,6 +578,37 @@ func (s *Service) setMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	anthropic.WriteJSON(w, 200, map[string]any{"mode": b.Mode})
+}
+
+// proxyView 全局代理，不返回密码。
+func proxyView(p *httpx.Proxy) map[string]any {
+	if p == nil {
+		return map[string]any{"proxyUrl": "", "proxyUsername": "", "hasPassword": false}
+	}
+	return map[string]any{"proxyUrl": kiro.DisplayProxyURL(p.URL), "proxyUsername": p.Username, "hasPassword": p.Password != ""}
+}
+
+func (s *Service) getProxy(w http.ResponseWriter, _ *http.Request) {
+	anthropic.WriteJSON(w, 200, proxyView(s.TM.GlobalProxy()))
+}
+
+func (s *Service) setProxy(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Proxy string `json:"proxy"`
+	}
+	if !decode(w, r, &b) {
+		return
+	}
+	p, err := s.TM.SetGlobalProxy(b.Proxy)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "保存全局代理失败") {
+			writeSvcErr(w, internal(err.Error()))
+		} else {
+			writeSvcErr(w, invalid(err.Error()))
+		}
+		return
+	}
+	anthropic.WriteJSON(w, 200, proxyView(p))
 }
 
 func (s *Service) socialStart(w http.ResponseWriter, r *http.Request) {

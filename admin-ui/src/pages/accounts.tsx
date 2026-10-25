@@ -14,6 +14,7 @@ import { Badge, Checkbox, Dot, Segmented, Spinner, Switch } from '@/components/u
 import { Empty, EmptyRow, MenuItem, MenuSeparator, Panel, RowMenu, Table, Td, Th, THead, Tr } from '@/components/ui/surface'
 import { AccountSheet } from '@/components/account-sheet'
 import { AddAccountSheet } from '@/components/add-account'
+import { ProxyButton } from '@/components/proxy-sheet'
 
 type Filter = 'all' | 'ok' | 'issue' | 'off'
 
@@ -153,6 +154,7 @@ export function AccountsPage() {
             { value: 'balanced', label: '均衡' },
           ]}
         />
+        <ProxyButton accounts={all} />
         <Button variant="primary" size="md" onClick={() => setAdding(true)}>
           <Plus className="h-4 w-4" />
           添加账号

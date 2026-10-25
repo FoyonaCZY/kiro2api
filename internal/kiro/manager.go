@@ -88,8 +88,9 @@ type CallContext struct {
 
 // Manager 多凭据管理和调度。
 type Manager struct {
-	cfg   *config.Config
-	proxy *httpx.Proxy
+	cfg     *config.Config
+	proxyMu sync.RWMutex
+	proxy   *httpx.Proxy
 
 	mu          sync.Mutex
 	entries     []*entry
@@ -206,7 +207,11 @@ func NewManager(cfg *config.Config, creds []*Credentials, proxy *httpx.Proxy, cr
 func (m *Manager) Config() *config.Config { return m.cfg }
 
 // GlobalProxy 全局代理。
-func (m *Manager) GlobalProxy() *httpx.Proxy { return m.proxy }
+func (m *Manager) GlobalProxy() *httpx.Proxy {
+	m.proxyMu.RLock()
+	defer m.proxyMu.RUnlock()
+	return m.proxy
+}
 
 // Dir 数据目录（凭据文件所在目录）。
 func (m *Manager) Dir() string { return m.dir }
@@ -480,7 +485,7 @@ func (m *Manager) refreshIfNeeded(ctx context.Context, id uint64, force bool) (*
 		slog.Debug("Token 已被其他请求刷新，跳过刷新", "credential_id", id)
 		return cur, nil
 	}
-	fresh, err := RefreshToken(ctx, cur, m.cfg, cur.EffectiveProxy(m.proxy))
+	fresh, err := RefreshToken(ctx, cur, m.cfg, cur.EffectiveProxy(m.GlobalProxy()))
 	if err != nil {
 		return nil, err
 	}

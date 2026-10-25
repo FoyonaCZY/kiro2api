@@ -252,6 +252,43 @@ func TestSetLoadBalancingModePersists(t *testing.T) {
 	}
 }
 
+func TestSetGlobalProxyPersists(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(p, []byte(`{"loadBalancingMode":"priority"}`), 0o600)
+	cfg, _ := config.Load(p)
+	m, _ := NewManager(cfg, []*Credentials{{}, {ProxyURL: ProxyDirect}}, nil, "")
+	if _, err := m.SetGlobalProxy("socks5://1.2.3.4:1080:alice:pw"); err != nil {
+		t.Fatal(err)
+	}
+	c2, _ := config.Load(p)
+	if c2.ProxyURL != "socks5://1.2.3.4:1080" || c2.ProxyUsername != "alice" || c2.ProxyPassword != "pw" || c2.LoadBalancingMode != "priority" {
+		t.Fatalf("persist: %+v", c2)
+	}
+	if px := m.entries[0].cred.EffectiveProxy(m.GlobalProxy()); px == nil || px.Password != "pw" {
+		t.Fatalf("account without proxy must follow global: %+v", px)
+	}
+	if px := m.entries[1].cred.EffectiveProxy(m.GlobalProxy()); px != nil {
+		t.Fatal("direct account must stay direct")
+	}
+	// 只带用户名时沿用原密码
+	if px, err := m.SetGlobalProxy("socks5://alice@5.6.7.8:1080"); err != nil || px.URL != "socks5://5.6.7.8:1080" || px.Password != "pw" {
+		t.Fatalf("keep password: %v %+v", err, px)
+	}
+	if _, err := m.SetGlobalProxy("socks5://bob@5.6.7.8:1080"); err == nil {
+		t.Fatal("new user without password must fail")
+	}
+	if _, err := m.SetGlobalProxy("bad"); err == nil {
+		t.Fatal("invalid line must fail")
+	}
+	if px, err := m.SetGlobalProxy(""); err != nil || px != nil || m.GlobalProxy() != nil {
+		t.Fatal("clear")
+	}
+	c3, _ := config.Load(p)
+	if c3.ProxyURL != "" || c3.ProxyPassword != "" {
+		t.Fatalf("clear persist: %+v", c3)
+	}
+}
+
 func TestAddCredential(t *testing.T) {
 	m, _ := NewManager(config.Default(), nil, nil, "")
 	id, err := m.AddCredential(context.Background(), &Credentials{AuthMethod: "api_key", KiroAPIKey: "ksk_abc"})

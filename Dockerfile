@@ -15,6 +15,7 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/kiro2api ./cmd/kiro2api
 
 FROM alpine:3.21
+LABEL app=kiro2api
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=backend /out/kiro2api /app/kiro2api

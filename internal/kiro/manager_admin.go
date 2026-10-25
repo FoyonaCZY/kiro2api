@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/FoyonaCZY/kiro2api/internal/config"
+	"github.com/FoyonaCZY/kiro2api/internal/httpx"
 )
 
 // EntrySnapshot 管理端展示用，不含任何密钥。JSON 字段与 kiro.rs 一致。
@@ -355,7 +356,7 @@ func (m *Manager) UsageLimitsFor(ctx context.Context, id uint64) (*UsageLimits, 
 		token = cred.AccessToken
 	}
 	cred, _ = m.CredentialsOf(id)
-	ul, err := FetchUsageLimits(ctx, cred, m.cfg, token, cred.EffectiveProxy(m.proxy))
+	ul, err := FetchUsageLimits(ctx, cred, m.cfg, token, cred.EffectiveProxy(m.GlobalProxy()))
 	if err != nil {
 		return nil, err
 	}
@@ -425,7 +426,7 @@ func (m *Manager) AddCredential(ctx context.Context, nc *Credentials) (uint64, e
 
 	validated := nc
 	if !nc.IsClaudeAPI() && !nc.IsAPIKey() {
-		v, err := RefreshToken(ctx, nc, m.cfg, nc.EffectiveProxy(m.proxy))
+		v, err := RefreshToken(ctx, nc, m.cfg, nc.EffectiveProxy(m.GlobalProxy()))
 		if err != nil {
 			return 0, err
 		}
@@ -536,4 +537,43 @@ func (m *Manager) SetLoadBalancingMode(mode string) error {
 	m.cfg.LoadBalancingMode = mode
 	slog.Info("负载均衡模式已设置", "mode", mode)
 	return nil
+}
+
+// SetGlobalProxy 解析代理输入并写回 config.json，失败时不生效。空或 direct 表示直连。
+// 输入里有用户名但没密码、且用户名没变时沿用原密码。
+func (m *Manager) SetGlobalProxy(line string) (*httpx.Proxy, error) {
+	p, err := ParseProxyLine(line)
+	if err != nil {
+		return nil, err
+	}
+	var next *httpx.Proxy
+	if p.URL != "" && !strings.EqualFold(p.URL, ProxyDirect) {
+		next = &httpx.Proxy{URL: p.URL, Username: p.Username, Password: p.Password}
+		if old := m.GlobalProxy(); old != nil && next.Password == "" && next.Username != "" && next.Username == old.Username {
+			next.Password = old.Password
+		}
+		if next.Username != "" && next.Password == "" {
+			return nil, errors.New("代理用户名和密码要一起填")
+		}
+	}
+	url, user, pass := "", "", ""
+	if next != nil {
+		url, user, pass = next.URL, next.Username, next.Password
+	}
+	if path := m.cfg.Path(); path != "" {
+		c, err := config.Load(path)
+		if err == nil {
+			c.ProxyURL, c.ProxyUsername, c.ProxyPassword = url, user, pass
+			err = c.Save()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("保存全局代理失败: %w", err)
+		}
+	}
+	m.proxyMu.Lock()
+	m.proxy = next
+	m.cfg.ProxyURL, m.cfg.ProxyUsername, m.cfg.ProxyPassword = url, user, pass
+	m.proxyMu.Unlock()
+	slog.Info("全局代理已设置", "url", DisplayProxyURL(url))
+	return next, nil
 }

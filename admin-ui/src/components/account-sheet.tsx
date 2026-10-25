@@ -13,6 +13,7 @@ import { Badge, Dot, Meter, Spinner, Switch } from '@/components/ui/controls'
 import { Disclosure, Field, Input } from '@/components/ui/field'
 import { Prop, Props, SectionHeader, Sheet, SheetBody, SheetHeader, Stat } from '@/components/ui/surface'
 import { CostInput } from '@/components/cost-input'
+import { useGlobalProxy } from '@/components/proxy-sheet'
 
 export function AccountSheet({ credential, onClose }: { credential: CredentialStatusItem | null; onClose: () => void }) {
   const [editing, setEditing] = useState(false)
@@ -22,6 +23,13 @@ export function AccountSheet({ credential, onClose }: { credential: CredentialSt
       {credential ? (editing ? <EditView c={credential} onBack={() => setEditing(false)} /> : <DetailView c={credential} onEdit={() => setEditing(true)} onClose={onClose} />) : null}
     </Sheet>
   )
+}
+
+function ProxyValue({ c }: { c: CredentialStatusItem }) {
+  const global = useGlobalProxy()
+  if (c.proxyUrl?.toLowerCase() === 'direct') return <span className="text-[13px]">直连</span>
+  if (c.hasProxy) return <span className="break-all text-[13px]">{c.proxyUrl}</span>
+  return <span className="break-all text-[13px] text-fg2">跟随全局（{global.data?.proxyUrl || '直连'}）</span>
 }
 
 function DetailView({ c, onEdit, onClose }: { c: CredentialStatusItem; onEdit: () => void; onClose: () => void }) {
@@ -201,7 +209,7 @@ function DetailView({ c, onEdit, onClose }: { c: CredentialStatusItem; onEdit: (
             </Prop>
             {c.claudeBaseUrl ? <Prop label="地址"><span className="break-all">{c.claudeBaseUrl}</span></Prop> : null}
             {c.maskedApiKey ? <Prop label="API Key"><span className="font-mono text-[13px]">{c.maskedApiKey}</span></Prop> : null}
-            <Prop label="代理"><span className="break-all text-[13px]">{c.hasProxy ? c.proxyUrl : <span className="text-fg2">全局设置</span>}</span></Prop>
+            <Prop label="代理"><ProxyValue c={c} /></Prop>
           </Props>
         </section>
       </SheetBody>

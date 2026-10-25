@@ -194,17 +194,21 @@ type Log struct {
 	mu         sync.Mutex
 	db         *sql.DB
 	retain     int64
+	maxBytes   int64
 	sincePrune atomic.Uint64
 }
 
-// Open path 为空时用内存库。
-func Open(path string) *Log { return openWithRetain(path, retainRequests) }
+// Open path 为空时用内存库，不限大小。
+func Open(path string) *Log { return openWith(path, retainRequests, 0) }
+
+// OpenLimited 库里在用的数据超过 maxBytes 时从最旧的请求明细删起，汇总不受影响。
+func OpenLimited(path string, maxBytes int64) *Log { return openWith(path, retainRequests, maxBytes) }
 
 func openDB(path string) (*sql.DB, error) {
 	dsn := "file::memory:?_pragma=busy_timeout(2000)"
 	if path != "" {
 		_ = os.MkdirAll(filepath.Dir(path), 0o755)
-		dsn = "file:" + path + "?_pragma=busy_timeout(2000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+		dsn = "file:" + path + "?_pragma=busy_timeout(2000)&_pragma=auto_vacuum(INCREMENTAL)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=journal_size_limit(67108864)"
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -214,7 +218,9 @@ func openDB(path string) (*sql.DB, error) {
 	return db, db.Ping()
 }
 
-func openWithRetain(path string, retain int64) *Log {
+func openWithRetain(path string, retain int64) *Log { return openWith(path, retain, 0) }
+
+func openWith(path string, retain, maxBytes int64) *Log {
 	db, err := openDB(path)
 	if err != nil {
 		slog.Error("打开用量数据库失败，改用内存库", "err", err)
@@ -232,7 +238,26 @@ func openWithRetain(path string, retain int64) *Log {
 		slog.Warn("扣回失败请求 token 失败", "err", err)
 	}
 	_ = prune(db, retain)
-	return &Log{db: db, retain: retain}
+	if path != "" && maxBytes > 0 {
+		ndb, err := ensureIncrementalVacuum(db, path, maxBytes)
+		if err != nil {
+			slog.Warn("用量库空间回收没开成，旧数据仍会按上限删除", "err", err)
+		}
+		if ndb == nil {
+			if ndb, err = openDB(path); err != nil {
+				slog.Error("重新打开用量数据库失败，改用内存库", "err", err)
+				ndb, _ = openDB("")
+				_ = initSchema(ndb)
+			}
+		}
+		db = ndb
+		if n, err := pruneBySize(db, maxBytes, sizeLowWater); err != nil {
+			slog.Warn("按大小清理用量库失败", "err", err)
+		} else if n > 0 {
+			slog.Info("用量库超过上限，已删除最旧的请求明细", "rows", n)
+		}
+	}
+	return &Log{db: db, retain: retain, maxBytes: maxBytes}
 }
 
 func nowRFC3339() string { return time.Now().UTC().Format("2006-01-02T15:04:05.999999999-07:00") }
@@ -340,6 +365,11 @@ func (l *Log) Record(r NewRequest) {
 	if l.retain <= 100 || tick%pruneEvery == pruneEvery-1 {
 		if err := prune(l.db, l.retain); err != nil {
 			slog.Warn("清理旧请求失败", "err", err)
+		}
+		if n, err := pruneBySize(l.db, l.maxBytes, sizeLowWater); err != nil {
+			slog.Warn("按大小清理用量库失败", "err", err)
+		} else if n > 0 {
+			slog.Info("用量库超过上限，已删除最旧的请求明细", "rows", n)
 		}
 	}
 }

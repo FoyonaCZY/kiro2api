@@ -15,7 +15,8 @@ Anthropic Messages 兼容网关。后端是一池 Kiro 账号和 Claude Messages
 - Claude Messages API 账号：请求和响应原样双向透传；同一请求里每个账号只试一次，超时和 5xx 只换号
 - 接入 Key 和调度分组；限流冷却、连续失败停用、全组自动禁用后自愈
 - 模拟 prompt cache 计费（按接入 Key 隔离）；单价、账号人民币成本和成本倍率，改价后历史按新价重算；失败和断流请求不计费；另记上游 usage 实际报的 kiro:credits（按请求、模型、账号汇总，账号可看 ¥/credit）
-- 凭据存 `accounts.sqlite`，管理端修改立即生效；凭据级 SOCKS5 / HTTP 代理，`direct` 表示直连
+- 凭据存 `accounts.sqlite`，管理端修改立即生效；凭据级 SOCKS5 / HTTP 代理，`direct` 表示直连；没单独设代理的账号走全局代理，可在管理端账号页改，写回 `config.json`
+- 磁盘上限 `maxDiskGB`（默认 10，0 不限）：`usage.sqlite` 超过上限减 1GB 时从最旧的请求明细删起，汇总和计费不受影响；旧库第一次启动时会压缩一次
 
 ## 本地运行
 

@@ -1,6 +1,9 @@
 package usage
 
 import (
+	"database/sql"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -176,5 +179,67 @@ func TestPayloadProfileResponses(t *testing.T) {
 	if !strings.Contains(p, "input=4 messages=2 images=1") || !strings.Contains(p, "tools=1 function_calls=1 function_outputs=1") ||
 		!strings.Contains(p, "i0 user content=2500") || strings.Contains(p, "yyyy") {
 		t.Fatal(p)
+	}
+}
+
+func TestSizeLimitShrinksOldDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	// 模拟没开 auto_vacuum 的旧库
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	l := Open(path)
+	l.db.Exec(`PRAGMA auto_vacuum = NONE`)
+	blob := strings.Repeat("x", 200*1024)
+	for i := 0; i < 60; i++ {
+		l.Record(NewRequest{Model: "m", Status: 200, InputTokens: 10, InboundBody: blob, OutboundBody: blob})
+	}
+	l.db.Close()
+	st, _ := os.Stat(path)
+	if st.Size() < 20<<20 {
+		t.Fatalf("setup too small: %d", st.Size())
+	}
+
+	const limit = 8 << 20
+	l = OpenLimited(path, limit)
+	defer func() { l.db.Close() }()
+	var mode int
+	l.db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode)
+	if mode != 2 {
+		t.Fatalf("auto_vacuum=%d", mode)
+	}
+	total, used, _ := dbSize(l.db)
+	if used > limit || total > limit {
+		t.Fatalf("not shrunk: total=%d used=%d", total, used)
+	}
+	rows := l.List(1000)
+	if len(rows) == 0 || rows[0].ID != 60 {
+		t.Fatalf("newest rows must stay: %d", len(rows))
+	}
+	if s := l.Summary(); s.Requests != 60 {
+		t.Fatalf("totals must survive: %+v", s)
+	}
+	for i := 0; i < 200; i++ {
+		l.Record(NewRequest{Model: "m", Status: 200, InputTokens: 10, InboundBody: blob, OutboundBody: blob})
+	}
+	// 每 pruneEvery 次检查一次，中间最多多出这些
+	slack := int64(pruneEvery) * 400 << 10
+	if total, used, _ = dbSize(l.db); used > limit+slack || total > limit+slack {
+		t.Fatalf("keeps growing: total=%d used=%d", total, used)
+	}
+	if _, err := pruneBySize(l.db, limit/2, sizeLowWater); err != nil {
+		t.Fatal(err)
+	}
+	if total, _, _ = dbSize(l.db); total > limit/2 {
+		t.Fatalf("file must shrink after prune: %d", total)
+	}
+	l.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	if st, _ := os.Stat(path); st.Size() > limit/2 {
+		t.Fatalf("file on disk: %d", st.Size())
 	}
 }

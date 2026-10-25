@@ -7,3 +7,8 @@ services:
     volumes:
       - ./config:/app/config
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "3"

@@ -17,7 +17,7 @@ type CountTokensConfig struct {
 	APIURL   string
 	APIKey   string
 	AuthType string
-	Proxy    *httpx.Proxy
+	Proxy    func() *httpx.Proxy
 }
 
 var countCfg CountTokensConfig
@@ -109,7 +109,11 @@ func CountAllTokens(ctx context.Context, model string, system SystemList, messag
 }
 
 func countRemote(ctx context.Context, model string, system SystemList, messages []Message, tools []Tool) (uint64, error) {
-	cl, err := httpx.New(countCfg.Proxy, 300*time.Second)
+	var px *httpx.Proxy
+	if countCfg.Proxy != nil {
+		px = countCfg.Proxy()
+	}
+	cl, err := httpx.New(px, 300*time.Second)
 	if err != nil {
 		return 0, err
 	}

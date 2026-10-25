@@ -115,3 +115,21 @@ export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promi
   const { data } = await api.put<{ mode: 'priority' | 'balanced' }>('/config/load-balancing', { mode })
   return data
 }
+
+export interface GlobalProxy {
+  proxyUrl: string
+  proxyUsername: string
+  hasPassword: boolean
+}
+
+// 全局代理：没单独设代理的账号都走它
+export async function getGlobalProxy(): Promise<GlobalProxy> {
+  const { data } = await api.get<GlobalProxy>('/config/proxy')
+  return data
+}
+
+// 留空表示直连；只带用户名不带密码时沿用原密码
+export async function setGlobalProxy(proxy: string): Promise<GlobalProxy> {
+  const { data } = await api.put<GlobalProxy>('/config/proxy', { proxy })
+  return data
+}

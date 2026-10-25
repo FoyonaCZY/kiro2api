@@ -54,4 +54,6 @@ jobs:
             cd "$DATA"
             $DOCKER compose -p kiro2api -f docker-compose.kiro2api.yml up -d --force-recreate
             $DOCKER ps --filter name=kiro2api
+            # 旧版本镜像加载新镜像后变成悬空镜像，清掉
+            $DOCKER image prune -f --filter label=app=kiro2api
             rm -f /opt/kiro-deploy/kiro2api.tar.gz

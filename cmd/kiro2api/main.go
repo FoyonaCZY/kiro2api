@@ -98,14 +98,14 @@ func run(cfgPath, credPath string) error {
 	}
 	defer tm.FlushStats()
 	provider := kiro.NewProvider(tm, eps, cfg.DefaultEndpoint)
-	anthropic.InitCountTokens(anthropic.CountTokensConfig{APIURL: cfg.CountTokensAPIURL, APIKey: cfg.CountTokensAPIKey, AuthType: cfg.CountTokensAuthType, Proxy: proxy})
+	anthropic.InitCountTokens(anthropic.CountTokensConfig{APIURL: cfg.CountTokensAPIURL, APIKey: cfg.CountTokensAPIKey, AuthType: cfg.CountTokensAuthType, Proxy: tm.GlobalProxy})
 	if cfg.CacheEmulation.Enabled {
 		slog.Info("已开启模拟缓存计费", "read_ratio", cfg.CacheEmulation.ReadRatio, "creation_ratio", cfg.CacheEmulation.CreationRatio)
 	}
 	anthropic.InitCache(cfg.CacheEmulation)
 
 	dir := tm.Dir()
-	ul := usage.Open(filepath.Join(dir, "usage.sqlite"))
+	ul := usage.OpenLimited(filepath.Join(dir, "usage.sqlite"), cfg.UsageMaxBytes())
 	acc := access.Open(filepath.Join(dir, "access.sqlite"))
 	acc.ImportInitialKey(cfg.APIKey)
 
