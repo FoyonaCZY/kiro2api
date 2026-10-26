@@ -506,3 +506,20 @@ func prefix(secret string) string {
 	}
 	return string(r[:4]) + "…" + string(r[len(r)-4:])
 }
+
+// MaxMemberID 分组里出现过的最大凭据 id。
+func (s *Store) MaxMemberID() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var v sql.NullInt64
+	_ = s.db.QueryRow(`SELECT MAX(credential_id) FROM group_members`).Scan(&v)
+	return uint64(max(v.Int64, 0))
+}
+
+// RemoveCredential 账号删除后从所有分组移出。
+func (s *Store) RemoveCredential(id uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM group_members WHERE credential_id = ?`, int64(id))
+	return err
+}

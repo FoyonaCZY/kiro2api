@@ -133,3 +133,22 @@ func TestParseCallback(t *testing.T) {
 		t.Fatal(u)
 	}
 }
+
+func TestDeleteRemovesGroupMembership(t *testing.T) {
+	m, _ := kiro.NewManager(config.Default(), []*kiro.Credentials{{ID: 1, AuthMethod: "api_key", KiroAPIKey: "ksk_1"}, {ID: 2, AuthMethod: "api_key", KiroAPIKey: "ksk_2"}}, nil, "")
+	acc := access.Open("")
+	g, _ := acc.CreateGroup("power")
+	acc.SetMembers(g.ID, []uint64{2}, []uint64{1, 2})
+	s := NewService("adm", m, kiro.Endpoints(), usage.Open(""), acc)
+	mux := http.NewServeMux()
+	s.Routes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	do(t, srv, "POST", "/api/admin/credentials/2/disabled", "adm", `{"disabled":true}`)
+	if code, body := do(t, srv, "DELETE", "/api/admin/credentials/2", "adm", ""); code != 200 {
+		t.Fatal(code, body)
+	}
+	if acc.MaxMemberID() != 0 {
+		t.Fatal("deleted credential must leave groups")
+	}
+}

@@ -436,13 +436,11 @@ func (m *Manager) AddCredential(ctx context.Context, nc *Credentials) (uint64, e
 	validated.Disabled = false
 
 	m.mu.Lock()
-	var maxID uint64
 	for _, e := range m.entries {
-		if e.id > maxID {
-			maxID = e.id
-		}
+		m.maxID = max(m.maxID, e.id)
 	}
-	validated.ID = maxID + 1
+	m.maxID++
+	validated.ID = m.maxID
 	m.entries = append(m.entries, &entry{id: validated.ID, cred: validated})
 	m.mu.Unlock()
 	if err := m.persist(); err != nil {
@@ -576,4 +574,34 @@ func (m *Manager) SetGlobalProxy(line string) (*httpx.Proxy, error) {
 	m.proxyMu.Unlock()
 	slog.Info("全局代理已设置", "url", DisplayProxyURL(url))
 	return next, nil
+}
+
+// ReserveIDs 别处（用量、分组）还挂着历史数据的 id 不再分给新账号。
+func (m *Manager) ReserveIDs(id uint64) error {
+	m.mu.Lock()
+	if id <= m.maxID {
+		m.mu.Unlock()
+		return nil
+	}
+	m.maxID = id
+	m.mu.Unlock()
+	if m.store == nil {
+		return nil
+	}
+	return m.store.SetMaxID(id)
+}
+
+// NewSpareID 取一个以后不会分给账号的 id，用来归档历史数据。
+func (m *Manager) NewSpareID() (uint64, error) {
+	m.mu.Lock()
+	for _, e := range m.entries {
+		m.maxID = max(m.maxID, e.id)
+	}
+	m.maxID++
+	id := m.maxID
+	m.mu.Unlock()
+	if m.store == nil {
+		return id, nil
+	}
+	return id, m.store.SetMaxID(id)
 }

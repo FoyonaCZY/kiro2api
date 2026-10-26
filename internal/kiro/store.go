@@ -64,6 +64,9 @@ func initStore(db *sql.DB, path string) (*Store, error) {
 		data TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	)`)
+	if err == nil {
+		_, err = db.Exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`)
+	}
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -140,6 +143,24 @@ func (s *Store) Save(creds []*Credentials) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// MaxID 用过的最大凭据 id，删掉的也算。
+func (s *Store) MaxID() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var v int64
+	_ = s.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'max_id'`).Scan(&v)
+	return uint64(max(v, 0))
+}
+
+// SetMaxID 只增不减。
+func (s *Store) SetMaxID(id uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`INSERT INTO meta(key, value) VALUES ('max_id', ?)
+		ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))`, int64(id))
+	return err
 }
 
 // Close 关闭库。

@@ -1048,3 +1048,32 @@ func importLegacyJSON(db *sql.DB, sqlitePath string) error {
 	_, err = db.Exec(`INSERT INTO meta(key, value) VALUES('legacy_json', '1')`)
 	return err
 }
+
+// MaxCredentialID 历史数据里出现过的最大凭据 id。
+func (l *Log) MaxCredentialID() uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var v sql.NullInt64
+	_ = l.db.QueryRow(`SELECT MAX(id) FROM (
+		SELECT MAX(credential_id) AS id FROM requests UNION ALL
+		SELECT MAX(credential_id) FROM account_totals UNION ALL
+		SELECT MAX(credential_id) FROM account_costs)`).Scan(&v)
+	return uint64(max(v.Int64, 0))
+}
+
+// MoveAccount 把一个凭据的历史（明细、汇总、成本）整体挪到另一个 id。to 必须是没用过的 id。
+func (l *Log) MoveAccount(from, to uint64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	tx, err := l.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	for _, t := range []string{"requests", "account_totals", "account_costs"} {
+		if _, err := tx.Exec(`UPDATE `+t+` SET credential_id = ? WHERE credential_id = ?`, int64(to), int64(from)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}

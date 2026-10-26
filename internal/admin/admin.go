@@ -247,6 +247,7 @@ func (s *Service) Routes(mux *http.ServeMux) {
 		anthropic.WriteJSON(w, 200, s.Usage.AccountReport(s.labels()))
 	})
 	h("PUT "+p+"/usage/accounts/{id}/cost", s.setAccountCost)
+	h("POST "+p+"/usage/accounts/{id}/archive", s.archiveAccountUsage)
 	h("GET "+p+"/access/keys", func(w http.ResponseWriter, _ *http.Request) {
 		keys := s.Access.ListKeys()
 		if keys == nil {
@@ -551,6 +552,9 @@ func (s *Service) deleteCredential(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if err := s.Access.RemoveCredential(id); err != nil {
+		slog.Warn("把删除的凭据移出分组失败", "credential_id", id, "err", err)
+	}
 	s.balMu.Lock()
 	delete(s.balances, id)
 	s.balMu.Unlock()
@@ -709,6 +713,25 @@ func (s *Service) setAccountCost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	anthropic.WriteJSON(w, 200, s.Usage.AccountReport(s.labels()))
+}
+
+// archiveAccountUsage 把账号现有的用量历史挪到一个新的已删除编号下，账号从零开始统计。
+func (s *Service) archiveAccountUsage(w http.ResponseWriter, r *http.Request) {
+	id, okID := pathID(w, r)
+	if !okID {
+		return
+	}
+	spare, err := s.TM.NewSpareID()
+	if err != nil {
+		writeSvcErr(w, internal(err.Error()))
+		return
+	}
+	if err := s.Usage.MoveAccount(id, spare); err != nil {
+		writeSvcErr(w, internal(err.Error()))
+		return
+	}
+	slog.Info("已归档账号用量历史", "credential_id", id, "archived_as", spare)
+	anthropic.WriteJSON(w, 200, map[string]any{"archivedAs": spare, "report": s.Usage.AccountReport(s.labels())})
 }
 
 func (s *Service) createKey(w http.ResponseWriter, r *http.Request) {

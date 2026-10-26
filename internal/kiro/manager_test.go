@@ -342,3 +342,41 @@ func TestTokenExpiry(t *testing.T) {
 		t.Fatal("1h")
 	}
 }
+
+func TestDeletedIDsAreNotReused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	m, err := NewManager(config.Default(), []*Credentials{{ID: 3, AuthMethod: "api_key", KiroAPIKey: "ksk_a"}, {ID: 4, AuthMethod: "api_key", KiroAPIKey: "ksk_b"}}, nil, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetDisabled(4, true)
+	if err := m.DeleteCredential(4); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := m.AddCredential(context.Background(), &Credentials{AuthMethod: "api_key", KiroAPIKey: "ksk_c"}); err != nil || id != 5 {
+		t.Fatalf("deleted id reused: %d %v", id, err)
+	}
+	m.SetDisabled(5, true)
+	m.DeleteCredential(5)
+	m.store.Close()
+
+	// 重启后仍记得用过的编号
+	creds, err := LoadStartupCredentials(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err = NewManager(config.Default(), creds, nil, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.store.Close()
+	if err := m.ReserveIDs(7); err != nil {
+		t.Fatal(err)
+	}
+	if spare, _ := m.NewSpareID(); spare != 8 {
+		t.Fatalf("spare %d", spare)
+	}
+	if id, _ := m.AddCredential(context.Background(), &Credentials{AuthMethod: "api_key", KiroAPIKey: "ksk_d"}); id != 9 {
+		t.Fatalf("after restart got %d", id)
+	}
+}

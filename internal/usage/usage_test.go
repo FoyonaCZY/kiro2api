@@ -243,3 +243,29 @@ func TestSizeLimitShrinksOldDB(t *testing.T) {
 		t.Fatalf("file on disk: %d", st.Size())
 	}
 }
+
+func TestMoveAccount(t *testing.T) {
+	l := Open("")
+	l.UpsertPrice(ModelPrice{Name: "S", Aliases: []string{"m"}, InputPerM: 1})
+	l.Record(NewRequest{CredentialID: 4, Model: "m", Status: 200, InputTokens: 1_000_000})
+	cost := 9.0
+	l.SetAccountCost(4, &cost)
+	if l.MaxCredentialID() != 4 {
+		t.Fatal("max id")
+	}
+	if err := l.MoveAccount(4, 5); err != nil {
+		t.Fatal(err)
+	}
+	r := l.AccountReport([]Label{{4, "new"}})
+	if r.Accounts[0].CredentialID != 4 || r.Accounts[0].Requests != 0 || r.Accounts[0].UsageUSD != 0 || r.Accounts[0].CostCNY != nil {
+		t.Fatalf("new account must start clean: %+v", r.Accounts[0])
+	}
+	if a := r.Accounts[1]; a.CredentialID != 5 || !a.Removed || a.Requests != 1 || a.UsageUSD != 1 || a.CostCNY == nil {
+		t.Fatalf("history must move: %+v", a)
+	}
+	var n int
+	l.db.QueryRow(`SELECT COUNT(*) FROM requests WHERE credential_id = 5`).Scan(&n)
+	if n != 1 {
+		t.Fatal("request rows must move")
+	}
+}

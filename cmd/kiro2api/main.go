@@ -108,6 +108,10 @@ func run(cfgPath, credPath string) error {
 	ul := usage.OpenLimited(filepath.Join(dir, "usage.sqlite"), cfg.UsageMaxBytes())
 	acc := access.Open(filepath.Join(dir, "access.sqlite"))
 	acc.ImportInitialKey(cfg.APIKey)
+	// 用量和分组里还挂着已删除账号的数据，这些编号不再分给新账号
+	if err := tm.ReserveIDs(max(ul.MaxCredentialID(), acc.MaxMemberID())); err != nil {
+		slog.Warn("记录已用凭据编号失败", "err", err)
+	}
 
 	mux := http.NewServeMux()
 	api := &anthropic.Server{APIKey: cfg.APIKey, Provider: provider, ExtractThinking: cfg.ExtractThinking, Usage: ul, Access: acc}

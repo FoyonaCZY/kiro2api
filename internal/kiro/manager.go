@@ -94,6 +94,7 @@ type Manager struct {
 
 	mu          sync.Mutex
 	entries     []*entry
+	maxID       uint64 // 用过的最大 id，删掉的账号也算，新账号不复用
 	currentID   uint64
 	groupSticky map[string]uint64
 	mode        string
@@ -181,7 +182,7 @@ func NewManager(cfg *config.Config, creds []*Credentials, proxy *httpx.Proxy, cr
 	if len(dup) > 0 {
 		return nil, fmt.Errorf("检测到重复的凭据 ID: %v", dup)
 	}
-	m := &Manager{cfg: cfg, proxy: proxy, entries: entries, groupSticky: map[string]uint64{}, mode: cfg.LoadBalancingMode}
+	m := &Manager{cfg: cfg, proxy: proxy, entries: entries, groupSticky: map[string]uint64{}, mode: cfg.LoadBalancingMode, maxID: next - 1}
 	m.currentID = m.highestPriorityLocked(0)
 	if credentialsPath != "" {
 		m.dir = dirOf(credentialsPath)
@@ -190,6 +191,7 @@ func NewManager(cfg *config.Config, creds []*Credentials, proxy *httpx.Proxy, cr
 			return nil, err
 		}
 		m.store = store
+		m.maxID = max(m.maxID, store.MaxID())
 		importing := store.IsEmpty()
 		if importing || changed {
 			if err := m.persist(); err != nil {
@@ -519,8 +521,12 @@ func (m *Manager) persist() error {
 		c.Disabled = e.disabled
 		list = append(list, c)
 	}
+	maxID := m.maxID
 	m.mu.Unlock()
-	return m.store.Save(list)
+	if err := m.store.Save(list); err != nil {
+		return err
+	}
+	return m.store.SetMaxID(maxID)
 }
 
 type statsEntry struct {
