@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // CacheEmulation 模拟 prompt cache 计费。
@@ -86,7 +89,52 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置 %s: %w", path, err)
 	}
 	cfg.path = path
+	cfg.floorVersions()
 	return cfg, nil
+}
+
+// floorVersions 配置里写的 IDE 版本比内置的旧时改用内置版本，免得旧配置把指纹钉在老版本上。
+// 管理端改设置写回 config.json 时，新版本号会一并写进去。
+func (c *Config) floorVersions() {
+	d := Default()
+	for _, f := range []struct {
+		name     string
+		cur      *string
+		fallback string
+	}{
+		{"kiroVersion", &c.KiroVersion, d.KiroVersion},
+		{"kasVersion", &c.KASVersion, d.KASVersion},
+		{"nodeVersion", &c.NodeVersion, d.NodeVersion},
+	} {
+		if olderVersion(*f.cur, f.fallback) {
+			if *f.cur != "" {
+				slog.Warn("配置里的版本比内置的旧，改用内置版本", "field", f.name, "config", *f.cur, "using", f.fallback)
+			}
+			*f.cur = f.fallback
+		}
+	}
+}
+
+// olderVersion 按点分数字比较，a 为空或解析不了也算旧。
+func olderVersion(a, b string) bool {
+	pa, pb := strings.Split(strings.TrimSpace(a), "."), strings.Split(b, ".")
+	for i := 0; i < max(len(pa), len(pb)); i++ {
+		var x, y int
+		if i < len(pa) {
+			n, err := strconv.Atoi(pa[i])
+			if err != nil {
+				return true
+			}
+			x = n
+		}
+		if i < len(pb) {
+			y, _ = strconv.Atoi(pb[i])
+		}
+		if x != y {
+			return x < y
+		}
+	}
+	return false
 }
 
 // Path 配置文件路径。
