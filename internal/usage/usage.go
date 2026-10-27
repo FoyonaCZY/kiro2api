@@ -195,6 +195,8 @@ type Log struct {
 	db         *sql.DB
 	retain     int64
 	maxBytes   int64
+	hitRate    float64 // 存量明细读出时按这个命中率换算
+	hitUpto    int64   // 只换算 id 不超过它的行
 	sincePrune atomic.Uint64
 }
 
@@ -446,6 +448,7 @@ func (l *Log) List(limit int) []RequestView {
 		if err != nil {
 			continue
 		}
+		l.adjustCache(r)
 		out = append(out, RequestView{RequestRecord: *r, CostUSD: Charge(prices, r.Model, r.tokens())})
 	}
 	return out
@@ -462,6 +465,7 @@ func (l *Log) Get(id uint64) *RequestDetail {
 	if err != nil {
 		return nil
 	}
+	l.adjustCache(r)
 	return &RequestDetail{
 		RequestView:    RequestView{RequestRecord: *r, CostUSD: Charge(prices, r.Model, r.tokens())},
 		InboundHeaders: ih.String, InboundBody: ib.String, OutboundHeaders: oh.String, OutboundBody: ob.String,
@@ -1078,8 +1082,8 @@ func (l *Log) MoveAccount(from, to uint64) error {
 	return tx.Commit()
 }
 
-// ApplyCacheHitRate 按固定命中率重拆存量的缓存 token：明细每行上下浮动 1 个点，汇总按命中率整拆。
-// 写缓存里 5m/1h 的比例保持不变，未命中部分全部算写缓存。同一命中率只做一次。
+// ApplyCacheHitRate 按固定命中率重拆存量的缓存 token。汇总表（很小）直接改写；请求明细行带着大请求体，
+// 改写代价太高，只记下截至哪一行，读的时候按行号取稳定浮动换算。同一命中率只做一次。
 func (l *Log) ApplyCacheHitRate(rate float64) error {
 	if rate <= 0 {
 		return nil
@@ -1089,7 +1093,10 @@ func (l *Log) ApplyCacheHitRate(rate float64) error {
 	defer l.mu.Unlock()
 	val := strconv.FormatFloat(rate, 'f', -1, 64)
 	var cur string
+	var upto int64
 	if err := l.db.QueryRow(`SELECT value FROM meta WHERE key = 'cache_hit_rate'`).Scan(&cur); err == nil && cur == val {
+		_ = l.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'cache_hit_upto'`).Scan(&upto)
+		l.hitRate, l.hitUpto = rate, upto
 		return nil
 	}
 	tx, err := l.db.Begin()
@@ -1097,45 +1104,40 @@ func (l *Log) ApplyCacheHitRate(rate float64) error {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	type row struct {
-		id             int64
-		in, cr, c5, c1 int64
-	}
-	rows, err := tx.Query(`SELECT id, input_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens FROM requests
-		WHERE status < 400 AND input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens > 0`)
-	if err != nil {
-		return err
-	}
-	var list []row
-	for rows.Next() {
-		var r row
-		if rows.Scan(&r.id, &r.in, &r.cr, &r.c5, &r.c1) == nil {
-			list = append(list, r)
-		}
-	}
-	rows.Close()
-	for _, r := range list {
-		// 按行号取一个稳定的浮动，重跑结果一样
-		u := float64(uint64(r.id)*2654435761%1000) / 1000
-		in, cr, c5, c1 := resplit(r.in+r.cr+r.c5+r.c1, math.Min(math.Max(rate+(u-0.5)*0.02, 0), 1), r.c5, r.c1)
-		if _, err := tx.Exec(`UPDATE requests SET input_tokens = ?, cache_read_tokens = ?, cache_write_5m_tokens = ?, cache_write_1h_tokens = ? WHERE id = ?`,
-			in, cr, c5, c1, r.id); err != nil {
-			return err
-		}
-	}
 	for _, t := range []string{"model_totals", "account_totals"} {
 		if err := resplitTotals(tx, t, rate); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO meta(key, value) VALUES('cache_hit_rate', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, val); err != nil {
+	var maxID sql.NullInt64
+	if err := tx.QueryRow(`SELECT MAX(id) FROM requests`).Scan(&maxID); err != nil {
 		return err
+	}
+	for k, v := range map[string]string{"cache_hit_rate": val, "cache_hit_upto": strconv.FormatInt(maxID.Int64, 10)} {
+		if _, err := tx.Exec(`INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, k, v); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	slog.Info("已按缓存命中率重算存量用量", "hit_rate", val, "requests", len(list))
+	l.hitRate, l.hitUpto = rate, maxID.Int64
+	slog.Info("已按缓存命中率重算存量用量", "hit_rate", val, "requests_upto", maxID.Int64)
 	return nil
+}
+
+// adjustCache 存量明细行读出时按命中率换算，和 ApplyCacheHitRate 对汇总的重拆一致。
+func (l *Log) adjustCache(r *RequestRecord) {
+	if l.hitRate <= 0 || int64(r.ID) > l.hitUpto || r.Status >= 400 {
+		return
+	}
+	total := r.InputTokens + r.CacheReadTokens + r.CacheWrite5mTokens + r.CacheWrite1hTokens
+	if total <= 0 {
+		return
+	}
+	u := float64(r.ID*2654435761%1000) / 1000
+	r.InputTokens, r.CacheReadTokens, r.CacheWrite5mTokens, r.CacheWrite1hTokens =
+		resplit(total, math.Min(math.Max(l.hitRate+(u-0.5)*0.02, 0), 1), r.CacheWrite5mTokens, r.CacheWrite1hTokens)
 }
 
 func resplitTotals(tx *sql.Tx, table string, rate float64) error {
