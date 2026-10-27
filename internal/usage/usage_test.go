@@ -2,6 +2,7 @@ package usage
 
 import (
 	"database/sql"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,5 +268,47 @@ func TestMoveAccount(t *testing.T) {
 	l.db.QueryRow(`SELECT COUNT(*) FROM requests WHERE credential_id = 5`).Scan(&n)
 	if n != 1 {
 		t.Fatal("request rows must move")
+	}
+}
+
+func TestApplyCacheHitRate(t *testing.T) {
+	l := Open("")
+	l.UpsertPrice(ModelPrice{Name: "S", Aliases: []string{"m"}, InputPerM: 10})
+	for i := 0; i < 20; i++ {
+		l.Record(NewRequest{CredentialID: 1, Model: "m", Status: 200, InputTokens: 500_000, CacheReadTokens: 300_000, CacheWrite1hTokens: 200_000})
+	}
+	l.Record(NewRequest{CredentialID: 1, Model: "m", Status: 200, InputTokens: 1_000_000})
+	l.Record(NewRequest{CredentialID: 1, Model: "m", Status: 500, InputTokens: 1_000_000})
+	before := l.Summary()
+	if err := l.ApplyCacheHitRate(0.97); err != nil {
+		t.Fatal(err)
+	}
+	s := l.Summary()
+	total := s.InputTokens + s.CacheReadTokens + s.CacheWrite5mTokens + s.CacheWrite1hTokens
+	if total != before.InputTokens+before.CacheReadTokens+before.CacheWrite5mTokens+before.CacheWrite1hTokens {
+		t.Fatal("total input must not change")
+	}
+	if hit := float64(s.CacheReadTokens) / float64(total); math.Abs(hit-0.97) > 1e-6 || s.InputTokens != 0 {
+		t.Fatalf("totals hit %v %+v", hit, s)
+	}
+	r := l.AccountReport([]Label{{1, "a"}})
+	if a := r.Accounts[0]; float64(a.CacheReadTokens)/float64(a.CacheReadTokens+a.CacheWrite1hTokens+a.CacheWrite5mTokens+a.InputTokens) < 0.969 {
+		t.Fatalf("account totals: %+v", a)
+	}
+	for _, row := range l.List(100) {
+		tot := row.InputTokens + row.CacheReadTokens + row.CacheWrite5mTokens + row.CacheWrite1hTokens
+		if row.Status >= 400 {
+			if row.CacheReadTokens != 0 {
+				t.Fatal("failed rows untouched")
+			}
+			continue
+		}
+		if hit := float64(row.CacheReadTokens) / float64(tot); hit < 0.96-1e-6 || hit > 0.98+1e-6 {
+			t.Fatalf("row hit %v", hit)
+		}
+	}
+	snap := l.Summary()
+	if err := l.ApplyCacheHitRate(0.97); err != nil || l.Summary().CacheReadTokens != snap.CacheReadTokens {
+		t.Fatal("same rate must run once")
 	}
 }

@@ -1,11 +1,14 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/FoyonaCZY/kiro2api/internal/config"
 )
 
 func longSystem() string { return strings.Repeat("cache ", 3000) }
@@ -110,5 +113,25 @@ func TestCacheThresholdAndApply(t *testing.T) {
 	InitCache(configDisabled())
 	if j := UsageJSON(&s, 100, 7); len(j) != 2 {
 		t.Fatalf("disabled shape %v", j)
+	}
+}
+
+func TestFixedHitRate(t *testing.T) {
+	InitCache(config.CacheEmulation{Enabled: true, ReadRatio: 1, CreationRatio: 1, HitRate: 0.97})
+	defer InitCache(configDisabled())
+	p := Profile(turnOne(longSystem()))
+	for i := 0; i < 50; i++ {
+		s := Observe(context.Background(), p)
+		if s.Read < 0.96-1e-9 || s.Read > 0.98+1e-9 || math.Abs(s.Read+s.Creation-1) > 1e-9 {
+			t.Fatalf("%+v", s)
+		}
+		u := UsageForLog(s, 100_000)
+		if u.InputTokens+u.CacheRead+u.Creation() != 100_000 || u.CacheRead < 96_000 || u.CacheRead > 98_000 {
+			t.Fatalf("%+v", u)
+		}
+		j := UsageJSON(s, 100_000, 5)
+		if j["cache_read_input_tokens"] != u.CacheRead {
+			t.Fatal("client and log must agree")
+		}
 	}
 }

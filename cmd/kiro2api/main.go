@@ -106,6 +106,11 @@ func run(cfgPath, credPath string) error {
 
 	dir := tm.Dir()
 	ul := usage.OpenLimited(filepath.Join(dir, "usage.sqlite"), cfg.UsageMaxBytes())
+	if cfg.CacheEmulation.Enabled {
+		if err := ul.ApplyCacheHitRate(cfg.CacheEmulation.HitRate); err != nil {
+			slog.Warn("按缓存命中率重算存量用量失败", "err", err)
+		}
+	}
 	acc := access.Open(filepath.Join(dir, "access.sqlite"))
 	acc.ImportInitialKey(cfg.APIKey)
 	// 用量和分组里还挂着已删除账号的数据，这些编号不再分给新账号

@@ -1077,3 +1077,98 @@ func (l *Log) MoveAccount(from, to uint64) error {
 	}
 	return tx.Commit()
 }
+
+// ApplyCacheHitRate 按固定命中率重拆存量的缓存 token：明细每行上下浮动 1 个点，汇总按命中率整拆。
+// 写缓存里 5m/1h 的比例保持不变，未命中部分全部算写缓存。同一命中率只做一次。
+func (l *Log) ApplyCacheHitRate(rate float64) error {
+	if rate <= 0 {
+		return nil
+	}
+	rate = math.Min(rate, 1)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	val := strconv.FormatFloat(rate, 'f', -1, 64)
+	var cur string
+	if err := l.db.QueryRow(`SELECT value FROM meta WHERE key = 'cache_hit_rate'`).Scan(&cur); err == nil && cur == val {
+		return nil
+	}
+	tx, err := l.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	type row struct {
+		id             int64
+		in, cr, c5, c1 int64
+	}
+	rows, err := tx.Query(`SELECT id, input_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens FROM requests
+		WHERE status < 400 AND input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens > 0`)
+	if err != nil {
+		return err
+	}
+	var list []row
+	for rows.Next() {
+		var r row
+		if rows.Scan(&r.id, &r.in, &r.cr, &r.c5, &r.c1) == nil {
+			list = append(list, r)
+		}
+	}
+	rows.Close()
+	for _, r := range list {
+		// 按行号取一个稳定的浮动，重跑结果一样
+		u := float64(uint64(r.id)*2654435761%1000) / 1000
+		in, cr, c5, c1 := resplit(r.in+r.cr+r.c5+r.c1, math.Min(math.Max(rate+(u-0.5)*0.02, 0), 1), r.c5, r.c1)
+		if _, err := tx.Exec(`UPDATE requests SET input_tokens = ?, cache_read_tokens = ?, cache_write_5m_tokens = ?, cache_write_1h_tokens = ? WHERE id = ?`,
+			in, cr, c5, c1, r.id); err != nil {
+			return err
+		}
+	}
+	for _, t := range []string{"model_totals", "account_totals"} {
+		if err := resplitTotals(tx, t, rate); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO meta(key, value) VALUES('cache_hit_rate', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, val); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	slog.Info("已按缓存命中率重算存量用量", "hit_rate", val, "requests", len(list))
+	return nil
+}
+
+func resplitTotals(tx *sql.Tx, table string, rate float64) error {
+	rows, err := tx.Query(`SELECT rowid, input_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens FROM ` + table)
+	if err != nil {
+		return err
+	}
+	type row struct{ id, in, cr, c5, c1 int64 }
+	var list []row
+	for rows.Next() {
+		var r row
+		if rows.Scan(&r.id, &r.in, &r.cr, &r.c5, &r.c1) == nil {
+			list = append(list, r)
+		}
+	}
+	rows.Close()
+	for _, r := range list {
+		in, cr, c5, c1 := resplit(r.in+r.cr+r.c5+r.c1, rate, r.c5, r.c1)
+		if _, err := tx.Exec(`UPDATE `+table+` SET input_tokens = ?, cache_read_tokens = ?, cache_write_5m_tokens = ?, cache_write_1h_tokens = ? WHERE rowid = ?`,
+			in, cr, c5, c1, r.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resplit total 个输入 token 按命中率拆成 读/写；写缓存按原来 5m:1h 的比例分，原来没有写缓存就记 5m。
+func resplit(total int64, hit float64, old5m, old1h int64) (in, read, w5m, w1h int64) {
+	total = max(total, 0)
+	read = min(int64(math.Round(float64(total)*hit)), total)
+	write := total - read
+	if old5m+old1h > 0 {
+		w1h = int64(math.Round(float64(write) * float64(old1h) / float64(old5m+old1h)))
+	}
+	return 0, read, write - w1h, w1h
+}

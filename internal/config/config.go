@@ -16,6 +16,8 @@ type CacheEmulation struct {
 	Enabled       bool    `json:"enabled"`
 	ReadRatio     float64 `json:"readRatio"`
 	CreationRatio float64 `json:"creationRatio"`
+	// HitRate 大于 0 时按这个命中率出账（每个请求上下浮动 1 个点），不再按前缀匹配估算；存量数据启动时按它重算。
+	HitRate float64 `json:"hitRate"`
 }
 
 // Config 字段名与 kiro.rs 的 camelCase JSON 一致，线上配置可直接复用。
@@ -68,7 +70,7 @@ func Default() *Config {
 		LoadBalancingMode:     "priority",
 		ExtractThinking:       true,
 		RateLimitCooldownSecs: 60,
-		CacheEmulation:        CacheEmulation{ReadRatio: 1, CreationRatio: 1},
+		CacheEmulation:        CacheEmulation{ReadRatio: 1, CreationRatio: 1, HitRate: 0.97},
 		DefaultEndpoint:       "krs",
 		MaxDiskGB:             10,
 	}

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"math"
+	"math/rand/v2"
 	"sort"
 	"strconv"
 	"strings"
@@ -378,6 +379,11 @@ func newCacheTracker() *cacheTracker {
 	return &cacheTracker{entries: map[string]map[[32]byte]*cacheEntry{}}
 }
 
+// HitWithJitter 命中率上下浮动 1 个点，u 取 [0,1)。
+func HitWithJitter(rate, u float64) float64 {
+	return clamp01(rate + (u-0.5)*0.02)
+}
+
 // Observe 上游 2xx 后调用：按接入 Key 查命中，并记下本次前缀。
 func Observe(ctx context.Context, p *CacheProfile) *CacheSplit {
 	if p == nil {
@@ -388,6 +394,10 @@ func Observe(ctx context.Context, p *CacheProfile) *CacheSplit {
 		ns = "key:" + strconv.FormatInt(id, 10)
 	}
 	s := tracker.observe(ns, p, time.Now())
+	if cfg, _ := cacheConfig(); cfg.HitRate > 0 {
+		hit := HitWithJitter(cfg.HitRate, rand.Float64())
+		s.Read, s.Creation = hit, 1-hit
+	}
 	return &s
 }
 
