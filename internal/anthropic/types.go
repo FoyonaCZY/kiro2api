@@ -139,13 +139,15 @@ type ContentBlock struct {
 	ID        *string         `json:"id,omitempty"`
 	IsError   *bool           `json:"is_error,omitempty"`
 	Source    *ImageSource    `json:"source,omitempty"`
+	Title     *string         `json:"title,omitempty"`
 }
 
-// ImageSource base64 图片。
+// ImageSource 图片/文档来源。只有 base64 能转给 Kiro，URL 只用来写占位文字。
 type ImageSource struct {
 	Type      string `json:"type"`
 	MediaType string `json:"media_type"`
 	Data      string `json:"data"`
+	URL       string `json:"url,omitempty"`
 }
 
 // CountTokensRequest count_tokens 请求。

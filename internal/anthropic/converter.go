@@ -161,30 +161,49 @@ func imageFormat(mt string) string {
 	return ""
 }
 
-func toolResultText(raw json.RawMessage) string {
+// toolResultContent tool_result 的文字和图片。能发的图片挪出来，结果里留一句说明；
+// 发不了的图片和文档换成占位文字。function_call_output 只能放文字，图片由调用方放进同一条用户消息。
+func toolResultContent(raw json.RawMessage) (string, []kiro.KiroImage) {
 	if len(raw) == 0 || string(raw) == "null" {
-		return ""
+		return "", nil
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		return s
+		return s, nil
 	}
 	var arr []map[string]any
 	if json.Unmarshal(raw, &arr) == nil {
 		var parts []string
+		var images []kiro.KiroImage
 		for _, it := range arr {
-			if t, ok := it["text"].(string); ok {
-				parts = append(parts, t)
+			switch it["type"] {
+			case "image":
+				src := mapImageSource(it["source"])
+				if im, ok := imageFromSource(src); ok {
+					images = append(images, im)
+				} else {
+					parts = append(parts, unsupportedImageNote(src))
+				}
+			case "document":
+				title, _ := it["title"].(string)
+				parts = append(parts, unsupportedDocumentNote(title))
+			default:
+				if t, ok := it["text"].(string); ok {
+					parts = append(parts, t)
+				}
 			}
 		}
-		return strings.Join(parts, "\n")
+		if len(images) > 0 {
+			parts = append(parts, fmt.Sprintf(toolResultImagesFormat, len(images)))
+		}
+		return strings.Join(parts, "\n"), images
 	}
 	var v any
 	if json.Unmarshal(raw, &v) == nil {
 		b, _ := Marshal(v)
-		return string(b)
+		return string(b), nil
 	}
-	return string(raw)
+	return string(raw), nil
 }
 
 // ParseBlocks 字符串内容当作一个 text 块；解析失败的块跳过。
@@ -220,11 +239,13 @@ func processContent(content json.RawMessage) (string, []kiro.KiroImage, []kiro.T
 				texts = append(texts, *b.Text)
 			}
 		case "image":
-			if b.Source != nil {
-				if f := imageFormat(b.Source.MediaType); f != "" {
-					images = append(images, kiro.KiroImage{Format: f, Source: kiro.KiroImageSource{Bytes: b.Source.Data}})
-				}
+			if im, ok := imageFromSource(b.Source); ok {
+				images = append(images, im)
+			} else {
+				texts = append(texts, unsupportedImageNote(b.Source))
 			}
+		case "document":
+			texts = append(texts, unsupportedDocumentNote(str(b.Title)))
 		case "tool_result":
 			if b.ToolUseID != nil {
 				isErr := b.IsError != nil && *b.IsError
@@ -232,9 +253,12 @@ func processContent(content json.RawMessage) (string, []kiro.KiroImage, []kiro.T
 				if isErr {
 					status = "error"
 				}
+				// 工具返回的图片（Read 读图片、截图工具）放进同一条用户消息，否则模型只看到一个空结果。
+				text, ims := toolResultContent(b.Content)
+				images = append(images, ims...)
 				results = append(results, kiro.ToolResult{
 					ToolUseID: *b.ToolUseID,
-					Content:   []map[string]any{{"text": toolResultText(b.Content)}},
+					Content:   []map[string]any{{"text": text}},
 					Status:    status,
 					IsError:   isErr,
 				})
@@ -242,6 +266,49 @@ func processContent(content json.RawMessage) (string, []kiro.KiroImage, []kiro.T
 		}
 	}
 	return strings.Join(texts, "\n"), images, results
+}
+
+// imageFromSource 只有 base64 的 jpeg/png/gif/webp 能发给 Kiro；URL、Files API 等来源返回 false。
+func imageFromSource(src *ImageSource) (kiro.KiroImage, bool) {
+	if src == nil || src.Data == "" {
+		return kiro.KiroImage{}, false
+	}
+	f := imageFormat(src.MediaType)
+	if f == "" {
+		return kiro.KiroImage{}, false
+	}
+	return kiro.KiroImage{Format: f, Source: kiro.KiroImageSource{Bytes: src.Data}}, true
+}
+
+func mapImageSource(v any) *ImageSource {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	field := func(k string) string {
+		s, _ := m[k].(string)
+		return s
+	}
+	return &ImageSource{Type: field("type"), MediaType: field("media_type"), Data: field("data"), URL: field("url")}
+}
+
+// hasUserInput 用户自己输入的文字、图片或文档才算新一轮；只有工具结果（包括工具返回的图片）的不算。
+func hasUserInput(content json.RawMessage) bool {
+	s, isStr, blocks := ParseBlocks(content)
+	if isStr {
+		return strings.TrimSpace(s) != ""
+	}
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			if b.Text != nil && strings.TrimSpace(*b.Text) != "" {
+				return true
+			}
+		case "image", "document":
+			return true
+		}
+	}
+	return false
 }
 
 func thinkingPrefix(req *MessagesRequest) string {
@@ -637,8 +704,7 @@ func turnInfo(msgs []Message) (turn, callPosition int) {
 		if m.Role != "user" {
 			continue
 		}
-		text, images, _ := processContent(m.Content)
-		if strings.TrimSpace(text) != "" || len(images) > 0 {
+		if hasUserInput(m.Content) {
 			turn++
 			last = i
 		}
@@ -734,7 +800,7 @@ func ConvertRequest(req *MessagesRequest) (*ConversionResult, error) {
 	if len(names.rev) > 0 {
 		slog.Info(fmt.Sprintf("工具名称映射: %d 个名称按 Kiro 规则改写", len(names.rev)))
 	}
-	limitHistoryImages(history, len(images))
+	limitHistoryImages(history, &cur)
 	turn, callPosition := turnInfo(msgs)
 	return &ConversionResult{
 		State: kiro.ConversationState{
