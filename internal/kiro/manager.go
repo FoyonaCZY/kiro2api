@@ -48,6 +48,7 @@ type entry struct {
 	successCount        uint64
 	lastUsedAt          string
 	cooldownUntil       time.Time
+	recentRequests      []time.Time // 均衡模式：最近一分钟被选中的时刻，不落盘
 }
 
 func isOpus(model string) bool { return strings.Contains(strings.ToLower(model), "opus") }
@@ -318,7 +319,8 @@ func (m *Manager) selectNextLocked(ctx context.Context, model string) *entry {
 			continue
 		}
 		if balanced {
-			if e.successCount < best.successCount || (e.successCount == best.successCount && e.cred.Priority < best.cred.Priority) {
+			er, br := e.recentCount(now), best.recentCount(now)
+			if er < br || (er == br && e.cred.Priority < best.cred.Priority) {
 				best = e
 			}
 		} else if e.cred.Priority < best.cred.Priority {
@@ -326,6 +328,30 @@ func (m *Manager) selectNextLocked(ctx context.Context, model string) *entry {
 		}
 	}
 	return best
+}
+
+const balanceWindow = time.Minute
+
+func (e *entry) recentCount(now time.Time) int {
+	cutoff := now.Add(-balanceWindow)
+	n := 0
+	for _, ts := range e.recentRequests {
+		if !ts.Before(cutoff) {
+			n++
+		}
+	}
+	return n
+}
+
+func (e *entry) noteRequest(now time.Time) {
+	cutoff := now.Add(-balanceWindow)
+	kept := e.recentRequests[:0]
+	for _, ts := range e.recentRequests {
+		if !ts.Before(cutoff) {
+			kept = append(kept, ts)
+		}
+	}
+	e.recentRequests = append(kept, now)
 }
 
 // AcquireContext 选号并保证 token 可用。刷新失败会累计，达到阈值禁用并换号。
@@ -429,6 +455,9 @@ func (m *Manager) pick(ctx context.Context, model string, total int) (uint64, *C
 		m.groupSticky[group] = best.id
 	} else {
 		m.currentID = best.id
+	}
+	if m.mode == "balanced" {
+		best.noteRequest(time.Now())
 	}
 	return best.id, best.cred.Clone(), nil
 }

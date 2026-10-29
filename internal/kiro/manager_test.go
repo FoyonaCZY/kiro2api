@@ -143,6 +143,39 @@ func TestBalancedSkipsBadRefresh(t *testing.T) {
 	}
 }
 
+func TestBalancedUsesLastMinute(t *testing.T) {
+	cfg := config.Default()
+	cfg.LoadBalancingMode = "balanced"
+	exp := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	m, err := NewManager(cfg, []*Credentials{
+		{AccessToken: "a", ExpiresAt: exp, Priority: 1},
+		{AccessToken: "b", ExpiresAt: exp, Priority: 2},
+	}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := m.AcquireContext(context.Background(), "")
+	if err != nil || first.ID != 1 {
+		t.Fatalf("tie goes to higher priority: %+v %v", first, err)
+	}
+	second, err := m.AcquireContext(context.Background(), "")
+	if err != nil || second.ID != 2 {
+		t.Fatalf("busier account must yield: %+v %v", second, err)
+	}
+	third, err := m.AcquireContext(context.Background(), "")
+	if err != nil || third.ID != 1 {
+		t.Fatalf("equal minute count goes to priority: %+v %v", third, err)
+	}
+	m.mu.Lock()
+	m.find(1).recentRequests = []time.Time{time.Now().Add(-2 * time.Minute)}
+	m.find(2).recentRequests = []time.Time{time.Now()}
+	m.mu.Unlock()
+	fourth, err := m.AcquireContext(context.Background(), "")
+	if err != nil || fourth.ID != 1 {
+		t.Fatalf("requests older than a minute must not count, got %+v %v", fourth, err)
+	}
+}
+
 func TestInvalidConfigAndDuplicates(t *testing.T) {
 	m, _ := NewManager(config.Default(), []*Credentials{{AuthMethod: "api_key"}}, nil, "")
 	s := m.Snapshot()

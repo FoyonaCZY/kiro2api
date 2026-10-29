@@ -151,7 +151,7 @@ export function AccountsPage() {
           onChange={(next) => setMode.mutate(next, { onError: (err) => toast.error(extractErrorMessage(err)) })}
           options={[
             { value: 'priority', label: '按优先级' },
-            { value: 'balanced', label: '均衡' },
+            { value: 'balanced', label: '近1分钟' },
           ]}
         />
         <ProxyButton accounts={all} />
