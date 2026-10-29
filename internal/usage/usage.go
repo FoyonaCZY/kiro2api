@@ -239,7 +239,7 @@ func openWith(path string, retain, maxBytes int64) *Log {
 	if err := excludeFailedTokens(db); err != nil {
 		slog.Warn("扣回失败请求 token 失败", "err", err)
 	}
-	_ = prune(db, retain)
+	_, _ = prune(db, retain)
 	if path != "" && maxBytes > 0 {
 		ndb, err := ensureIncrementalVacuum(db, path, maxBytes)
 		if err != nil {
@@ -253,7 +253,7 @@ func openWith(path string, retain, maxBytes int64) *Log {
 			}
 		}
 		db = ndb
-		if n, err := pruneBySize(db, maxBytes, sizeLowWater); err != nil {
+		if n, _, err := pruneBySize(db, maxBytes, sizeLowWater); err != nil {
 			slog.Warn("按大小清理用量库失败", "err", err)
 		} else if n > 0 {
 			slog.Info("用量库超过上限，已删除最旧的请求明细", "rows", n)
@@ -365,13 +365,29 @@ func (l *Log) Record(r NewRequest) {
 	}
 	tick := l.sincePrune.Add(1) - 1
 	if l.retain <= 100 || tick%pruneEvery == pruneEvery-1 {
-		if err := prune(l.db, l.retain); err != nil {
-			slog.Warn("清理旧请求失败", "err", err)
-		}
-		if n, err := pruneBySize(l.db, l.maxBytes, sizeLowWater); err != nil {
-			slog.Warn("按大小清理用量库失败", "err", err)
-		} else if n > 0 {
-			slog.Info("用量库超过上限，已删除最旧的请求明细", "rows", n)
+		// 每批删完就放开锁，请求列表和别的写入不用等整库收完。
+		for i := 0; i < maxBatchesPerTick; i++ {
+			removed, err := prune(l.db, l.retain)
+			if err != nil {
+				slog.Warn("清理旧请求失败", "err", err)
+				return
+			}
+			n, more, err := pruneBySize(l.db, l.maxBytes, sizeLowWater)
+			if err != nil {
+				slog.Warn("按大小清理用量库失败", "err", err)
+				return
+			}
+			if n > 0 {
+				slog.Info("用量库超过上限，已删除最旧的请求明细", "rows", n)
+			}
+			if removed < int64(pruneBatch) && !more {
+				return
+			}
+			if i == maxBatchesPerTick-1 {
+				return
+			}
+			l.mu.Unlock()
+			l.mu.Lock()
 		}
 	}
 }
@@ -876,9 +892,16 @@ func loadPrices(db *sql.DB) ([]ModelPrice, error) {
 	return out, rows.Err()
 }
 
-func prune(db *sql.DB, retain int64) error {
-	_, err := db.Exec(`DELETE FROM requests WHERE id < (SELECT MIN(id) FROM (SELECT id FROM requests ORDER BY id DESC LIMIT ?))`, max(retain, 1))
-	return err
+func prune(db *sql.DB, retain int64) (int64, error) {
+	res, err := db.Exec(`DELETE FROM requests WHERE id IN (
+		SELECT id FROM requests
+		WHERE id < (SELECT MIN(id) FROM (SELECT id FROM requests ORDER BY id DESC LIMIT ?))
+		ORDER BY id LIMIT ?)`, max(retain, 1), pruneBatch)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 func ensureColumn(db *sql.DB, table, column, def string) error {

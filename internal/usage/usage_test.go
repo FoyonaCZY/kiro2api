@@ -214,6 +214,7 @@ func TestSizeLimitShrinksOldDB(t *testing.T) {
 	if mode != 2 {
 		t.Fatalf("auto_vacuum=%d", mode)
 	}
+	mustShrink(t, l.db, limit)
 	total, used, _ := dbSize(l.db)
 	if used > limit || total > limit {
 		t.Fatalf("not shrunk: total=%d used=%d", total, used)
@@ -233,9 +234,7 @@ func TestSizeLimitShrinksOldDB(t *testing.T) {
 	if total, used, _ = dbSize(l.db); used > limit+slack || total > limit+slack {
 		t.Fatalf("keeps growing: total=%d used=%d", total, used)
 	}
-	if _, err := pruneBySize(l.db, limit/2, sizeLowWater); err != nil {
-		t.Fatal(err)
-	}
+	mustShrink(t, l.db, limit/2)
 	if total, _, _ = dbSize(l.db); total > limit/2 {
 		t.Fatalf("file must shrink after prune: %d", total)
 	}
@@ -310,5 +309,49 @@ func TestApplyCacheHitRate(t *testing.T) {
 	snap := l.Summary()
 	if err := l.ApplyCacheHitRate(0.97); err != nil || l.Summary().CacheReadTokens != snap.CacheReadTokens {
 		t.Fatal("same rate must run once")
+	}
+}
+
+func mustShrink(t *testing.T, db *sql.DB, limit int64) {
+	t.Helper()
+	for i := 0; i < 500; i++ {
+		total, used, err := dbSize(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if used <= limit && total <= limit {
+			return
+		}
+		if _, _, err := pruneBySize(db, limit, sizeLowWater); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Fatalf("did not shrink under %d", limit)
+}
+
+func TestPruneBySizeOneBatch(t *testing.T) {
+	l := Open("")
+	defer l.db.Close()
+	blob := strings.Repeat("y", 32*1024)
+	for i := 0; i < pruneBatch+15; i++ {
+		l.Record(NewRequest{Model: "m", Status: 200, InboundBody: blob})
+	}
+	var before int
+	if err := l.db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	n, more, err := pruneBySize(l.db, 1, sizeLowWater)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != int64(pruneBatch) || !more {
+		t.Fatalf("deleted %d more %v", n, more)
+	}
+	var after int
+	if err := l.db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if before-after != pruneBatch {
+		t.Fatalf("before %d after %d", before, after)
 	}
 }
